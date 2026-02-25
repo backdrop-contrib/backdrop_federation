@@ -5,5 +5,7 @@
     "actor_display_name": "",
     "actor_summary": "",
     "content_types": [],
-    "field_mapping": {}
+    "field_mapping": {},
+    "accept_replies": false,
+    "comment_moderation": false
 }

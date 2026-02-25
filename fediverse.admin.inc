@@ -104,6 +104,25 @@ function fediverse_admin_settings_form($form, &$form_state) {
     );
   }
 
+  $form['content']['accept_replies'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Accept fediverse replies as comments'),
+    '#description' => t('When enabled, replies to federated posts on the fediverse will be saved as comments on the corresponding node.'),
+    '#default_value' => $config->get('accept_replies'),
+  );
+
+  $form['content']['comment_moderation'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Hold fediverse replies for moderation before publishing'),
+    '#description' => t('Uncheck to publish replies immediately as comments.'),
+    '#default_value' => $config->get('comment_moderation'),
+    '#states' => array(
+      'visible' => array(
+        ':input[name="accept_replies"]' => array('checked' => TRUE),
+      ),
+    ),
+  );
+
   // Status information.
   $form['status'] = array(
     '#type' => 'fieldset',
@@ -280,6 +299,9 @@ function fediverse_admin_settings_form_submit($form, &$form_state) {
 
   // Save field mapping (preserve all types so selection survives disabling).
   $config->set('field_mapping', $form_state['values']['field_mapping'] ?: array());
+
+  $config->set('accept_replies', (bool) $form_state['values']['accept_replies']);
+  $config->set('comment_moderation', (bool) $form_state['values']['comment_moderation']);
 
   $config->save();
 

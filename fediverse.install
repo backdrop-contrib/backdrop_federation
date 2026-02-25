@@ -135,6 +135,52 @@ function fediverse_schema() {
     ),
   );
 
+  $schema['fediverse_received'] = array(
+    'description' => 'Tracks incoming ActivityPub objects saved as Backdrop comments.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'object_id' => array(
+        'description' => 'ActivityPub object URI (unique).',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'cid' => array(
+        'description' => 'Backdrop comment ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'nid' => array(
+        'description' => 'Node ID the comment belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when the record was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'unique keys' => array(
+      'object_id' => array(array('object_id', 255)),
+    ),
+    'indexes' => array(
+      'cid' => array('cid'),
+      'nid' => array('nid'),
+    ),
+  );
+
   return $schema;
 }
 
@@ -230,4 +276,58 @@ function _fediverse_generate_keypair() {
 
   watchdog('fediverse', 'RSA keypair generated successfully.', array(), WATCHDOG_INFO);
   return TRUE;
+}
+
+/**
+ * Add fediverse_received table for tracking incoming replies as comments.
+ */
+function fediverse_update_7001() {
+  if (!db_table_exists('fediverse_received')) {
+    $schema = array(
+      'description' => 'Tracks incoming ActivityPub objects saved as Backdrop comments.',
+      'fields' => array(
+        'id' => array(
+          'description' => 'Primary key.',
+          'type' => 'serial',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ),
+        'object_id' => array(
+          'description' => 'ActivityPub object URI (unique).',
+          'type' => 'varchar',
+          'length' => 2048,
+          'not null' => TRUE,
+        ),
+        'cid' => array(
+          'description' => 'Backdrop comment ID.',
+          'type' => 'int',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+        'nid' => array(
+          'description' => 'Node ID the comment belongs to.',
+          'type' => 'int',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+        'created' => array(
+          'description' => 'Timestamp when the record was created.',
+          'type' => 'int',
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+      ),
+      'primary key' => array('id'),
+      'unique keys' => array(
+        'object_id' => array(array('object_id', 255)),
+      ),
+      'indexes' => array(
+        'cid' => array('cid'),
+        'nid' => array('nid'),
+      ),
+    );
+    db_create_table('fediverse_received', $schema);
+  }
 }

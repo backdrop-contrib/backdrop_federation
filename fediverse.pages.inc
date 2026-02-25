@@ -249,6 +249,15 @@ function fediverse_inbox_endpoint() {
       }
       break;
 
+    case 'Create':
+      return _fediverse_handle_create($activity);
+
+    case 'Update':
+      return _fediverse_handle_update($activity);
+
+    case 'Delete':
+      return _fediverse_handle_delete($activity);
+
     case 'Accept':
     case 'Reject':
       // Acknowledgements - just log and accept.
@@ -407,6 +416,264 @@ function _fediverse_fetch_actor($actor_uri) {
   }
 
   return $data;
+}
+
+/**
+ * Build a "replied via fediverse" attribution note for a comment body.
+ *
+ * @param string $actor_name
+ *   The actor's preferredUsername.
+ * @param string $actor_url
+ *   The actor's profile URL.
+ *
+ * @return string
+ *   HTML paragraph with a fediverse-source class.
+ */
+function _fediverse_build_source_note($actor_name, $actor_url) {
+  $instance = $actor_url ? parse_url($actor_url, PHP_URL_HOST) : '';
+  $handle = '@' . $actor_name . ($instance ? '@' . $instance : '');
+  if ($actor_url) {
+    $link = '<a href="' . check_url($actor_url) . '">' . check_plain($handle) . '</a>';
+  }
+  else {
+    $link = check_plain($handle);
+  }
+  return '<p class="fediverse-source">' . t('Replied via the fediverse — !link', array('!link' => $link)) . '</p>';
+}
+
+/**
+ * Handle a Create activity — save a reply as a Backdrop comment.
+ *
+ * @param array $activity
+ *   The Create activity.
+ *
+ * @return array
+ *   Response array.
+ */
+function _fediverse_handle_create($activity) {
+  // Check the master switch.
+  if (!config_get('fediverse.settings', 'accept_replies')) {
+    return array('status' => 'ok');
+  }
+
+  // Object must be an array with a recognised type.
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+  if (!is_array($object) || !in_array(isset($object['type']) ? $object['type'] : '', array('Note', 'Article'))) {
+    return array('status' => 'ok');
+  }
+
+  // Only process replies.
+  $in_reply_to = isset($object['inReplyTo']) ? $object['inReplyTo'] : NULL;
+  if (empty($in_reply_to)) {
+    return array('status' => 'ok');
+  }
+
+  // The inReplyTo value must belong to this site.
+  global $base_url;
+  $local_host = parse_url($base_url, PHP_URL_HOST);
+  $reply_host = parse_url($in_reply_to, PHP_URL_HOST);
+  if ($reply_host !== $local_host) {
+    watchdog('fediverse', 'Ignoring reply to non-local URL: @url', array('@url' => $in_reply_to), WATCHDOG_DEBUG);
+    return array('status' => 'ok');
+  }
+
+  // Extract nid from the URL path.
+  $reply_path = parse_url($in_reply_to, PHP_URL_PATH);
+  if (!preg_match('/\/node\/(\d+)/', $reply_path, $matches)) {
+    watchdog('fediverse', 'Could not extract nid from inReplyTo URL: @url', array('@url' => $in_reply_to), WATCHDOG_DEBUG);
+    return array('status' => 'ok');
+  }
+  $nid = (int) $matches[1];
+
+  // Load and validate the node.
+  $node = node_load($nid);
+  if (!$node || !$node->status || !_fediverse_type_enabled($node->type)) {
+    return array('status' => 'ok');
+  }
+
+  // Prevent duplicate comments.
+  $object_id = isset($object['id']) ? $object['id'] : NULL;
+  if (empty($object_id)) {
+    return array('status' => 'ok');
+  }
+
+  $existing_cid = db_select('fediverse_received', 'r')
+    ->fields('r', array('cid'))
+    ->condition('object_id', substr($object_id, 0, 2048))
+    ->execute()
+    ->fetchField();
+
+  if ($existing_cid !== FALSE) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  // Fetch actor for display name / profile URL.
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  $actor_data = $actor_uri ? _fediverse_fetch_actor($actor_uri) : FALSE;
+  $actor_name = '';
+  $actor_url  = '';
+  if ($actor_data) {
+    $actor_name = isset($actor_data['preferredUsername']) ? $actor_data['preferredUsername'] : '';
+    if (empty($actor_name) && isset($actor_data['name'])) {
+      $actor_name = $actor_data['name'];
+    }
+    $actor_url = isset($actor_data['url']) ? $actor_data['url'] : $actor_uri;
+  }
+  if (empty($actor_name)) {
+    $actor_name = $actor_uri;
+  }
+
+  // Sanitize content and append attribution note.
+  $raw_content = isset($object['content']) ? $object['content'] : '';
+  $content = filter_xss($raw_content);
+  $subject  = truncate_utf8(strip_tags($content), 64, TRUE, TRUE);
+  if (empty($subject)) {
+    $subject = t('Fediverse reply');
+  }
+  $content .= "\n" . _fediverse_build_source_note($actor_name, $actor_url);
+
+  // Build the comment entity.
+  $moderation = config_get('fediverse.settings', 'comment_moderation');
+
+  $comment = entity_create('comment', array(
+    'nid'      => $nid,
+    'pid'      => 0,
+    'uid'      => 0,
+    'name'     => $actor_name,
+    'homepage' => $actor_url,
+    'subject'  => $subject,
+    'langcode' => LANGUAGE_NONE,
+    'status'   => $moderation ? COMMENT_NOT_PUBLISHED : COMMENT_PUBLISHED,
+  ));
+  $comment->comment_body[LANGUAGE_NONE][0] = array(
+    'value'  => $content,
+    'format' => 'filtered_html',
+  );
+
+  comment_save($comment);
+
+  // Record the mapping so updates/deletes can find this comment.
+  db_insert('fediverse_received')
+    ->fields(array(
+      'object_id' => substr($object_id, 0, 2048),
+      'cid'       => $comment->cid,
+      'nid'       => $nid,
+      'created'   => REQUEST_TIME,
+    ))
+    ->execute();
+
+  watchdog('fediverse', 'Saved fediverse reply as comment @cid on node @nid.', array(
+    '@cid' => $comment->cid,
+    '@nid' => $nid,
+  ), WATCHDOG_INFO);
+
+  backdrop_add_http_header('Status', '202 Accepted');
+  return array('status' => 'ok');
+}
+
+/**
+ * Handle an Update activity — edit the matching Backdrop comment.
+ *
+ * @param array $activity
+ *   The Update activity.
+ *
+ * @return array
+ *   Response array.
+ */
+function _fediverse_handle_update($activity) {
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+  if (!is_array($object) || empty($object['id'])) {
+    return array('status' => 'ok');
+  }
+
+  $object_id = $object['id'];
+
+  // Find the comment we stored for this object.
+  $cid = db_select('fediverse_received', 'r')
+    ->fields('r', array('cid'))
+    ->condition('object_id', substr($object_id, 0, 2048))
+    ->execute()
+    ->fetchField();
+
+  if ($cid === FALSE) {
+    // Not our comment — ignore silently.
+    return array('status' => 'ok');
+  }
+
+  $comment = comment_load($cid);
+  if (!$comment) {
+    return array('status' => 'ok');
+  }
+
+  // Sanitize and rebuild, re-appending the attribution note.
+  $raw_content = isset($object['content']) ? $object['content'] : '';
+  $content = filter_xss($raw_content);
+  $subject  = truncate_utf8(strip_tags($content), 64, TRUE, TRUE);
+  if (empty($subject)) {
+    $subject = t('Fediverse reply');
+  }
+  $content .= "\n" . _fediverse_build_source_note($comment->name, $comment->homepage);
+
+  $comment->subject = $subject;
+  $comment->comment_body[LANGUAGE_NONE][0] = array(
+    'value'  => $content,
+    'format' => 'filtered_html',
+  );
+
+  comment_save($comment);
+
+  watchdog('fediverse', 'Updated fediverse comment @cid from Update activity.', array('@cid' => $cid), WATCHDOG_INFO);
+
+  backdrop_add_http_header('Status', '202 Accepted');
+  return array('status' => 'ok');
+}
+
+/**
+ * Handle a Delete activity — remove the matching Backdrop comment.
+ *
+ * @param array $activity
+ *   The Delete activity.
+ *
+ * @return array
+ *   Response array.
+ */
+function _fediverse_handle_delete($activity) {
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+
+  // The object may be a plain string URI or an array with an 'id' key.
+  if (is_string($object)) {
+    $object_id = $object;
+  }
+  elseif (is_array($object) && !empty($object['id'])) {
+    $object_id = $object['id'];
+  }
+  else {
+    return array('status' => 'ok');
+  }
+
+  // Find the comment.
+  $row = db_select('fediverse_received', 'r')
+    ->fields('r', array('cid'))
+    ->condition('object_id', substr($object_id, 0, 2048))
+    ->execute()
+    ->fetchObject();
+
+  if (!$row) {
+    return array('status' => 'ok');
+  }
+
+  $cid = $row->cid;
+  comment_delete($cid);
+
+  db_delete('fediverse_received')
+    ->condition('object_id', substr($object_id, 0, 2048))
+    ->execute();
+
+  watchdog('fediverse', 'Deleted fediverse comment @cid from Delete activity.', array('@cid' => $cid), WATCHDOG_INFO);
+
+  backdrop_add_http_header('Status', '202 Accepted');
+  return array('status' => 'ok');
 }
 
 /**
