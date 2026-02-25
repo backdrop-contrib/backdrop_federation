@@ -1,0 +1,308 @@
+<?php
+/**
+ * @file
+ * Main module file for Fediverse ActivityPub integration.
+ *
+ * Enables one-way federation allowing Fediverse users to follow this site
+ * and receive posts in their feeds.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function fediverse_config_info() {
+  return array(
+    'fediverse.settings' => array(
+      'label' => t('Fediverse settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_permission().
+ */
+function fediverse_permission() {
+  return array(
+    'administer fediverse' => array(
+      'title' => t('Administer Fediverse settings'),
+      'description' => t('Configure ActivityPub federation settings.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function fediverse_menu() {
+  $items = array();
+
+  // Admin settings.
+  $items['admin/config/services/fediverse'] = array(
+    'title' => 'Fediverse',
+    'description' => 'Configure ActivityPub federation settings.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('fediverse_admin_settings_form'),
+    'access arguments' => array('administer fediverse'),
+    'file' => 'fediverse.admin.inc',
+  );
+
+  // WebFinger endpoint.
+  $items['.well-known/webfinger'] = array(
+    'page callback' => 'fediverse_webfinger_endpoint',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // NodeInfo discovery.
+  $items['.well-known/nodeinfo'] = array(
+    'page callback' => 'fediverse_nodeinfo_wellknown',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // NodeInfo 2.1 endpoint.
+  $items['nodeinfo/2.1'] = array(
+    'page callback' => 'fediverse_nodeinfo_endpoint',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Actor endpoint.
+  $items['fediverse/actor'] = array(
+    'page callback' => 'fediverse_actor_endpoint',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'fediverse_deliver_activitypub',
+  );
+
+  // Inbox endpoint.
+  $items['fediverse/inbox'] = array(
+    'page callback' => 'fediverse_inbox_endpoint',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'fediverse_deliver_activitypub',
+  );
+
+  // Outbox endpoint.
+  $items['fediverse/outbox'] = array(
+    'page callback' => 'fediverse_outbox_endpoint',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'fediverse_deliver_activitypub',
+  );
+
+  // Followers collection.
+  $items['fediverse/followers'] = array(
+    'page callback' => 'fediverse_followers_endpoint',
+    'access callback' => TRUE,
+    'file' => 'fediverse.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'fediverse_deliver_activitypub',
+  );
+
+  return $items;
+}
+
+/**
+ * Delivery callback for ActivityPub JSON responses.
+ *
+ * @param mixed $result
+ *   The page callback result to deliver.
+ */
+function fediverse_deliver_activitypub($result) {
+  if (is_int($result)) {
+    // Handle error codes.
+    switch ($result) {
+      case MENU_NOT_FOUND:
+        backdrop_add_http_header('Status', '404 Not Found');
+        $result = array('error' => 'Not Found');
+        break;
+
+      case MENU_ACCESS_DENIED:
+        backdrop_add_http_header('Status', '403 Forbidden');
+        $result = array('error' => 'Access Denied');
+        break;
+
+      default:
+        backdrop_add_http_header('Status', '500 Internal Server Error');
+        $result = array('error' => 'Internal Server Error');
+    }
+  }
+
+  backdrop_add_http_header('Content-Type', 'application/activity+json');
+  echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+  backdrop_page_footer();
+}
+
+/**
+ * Delivery callback for JSON responses.
+ *
+ * @param mixed $result
+ *   The page callback result to deliver.
+ */
+function fediverse_deliver_json($result) {
+  backdrop_add_http_header('Content-Type', 'application/json');
+  echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+  backdrop_page_footer();
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function fediverse_cron_queue_info() {
+  return array(
+    'fediverse_activity_delivery' => array(
+      'worker callback' => 'fediverse_deliver_activity_worker',
+      'time' => 60,
+    ),
+  );
+}
+
+/**
+ * Queue worker to deliver activities to follower inboxes.
+ *
+ * @param array $data
+ *   Queue item data containing activity_id and inbox_uri.
+ */
+function fediverse_deliver_activity_worker($data) {
+  module_load_include('inc', 'fediverse', 'includes/fediverse.http_signature');
+  module_load_include('inc', 'fediverse', 'includes/fediverse.activity');
+
+  $activity = db_select('fediverse_outbox', 'o')
+    ->fields('o', array('activity_json'))
+    ->condition('id', $data['activity_id'])
+    ->execute()
+    ->fetchField();
+
+  if (!$activity) {
+    watchdog('fediverse', 'Activity @id not found for delivery.', array('@id' => $data['activity_id']), WATCHDOG_WARNING);
+    return;
+  }
+
+  $result = fediverse_post_to_inbox($data['inbox_uri'], $activity);
+
+  if ($result === FALSE) {
+    watchdog('fediverse', 'Failed to deliver activity to @inbox', array('@inbox' => $data['inbox_uri']), WATCHDOG_WARNING);
+  }
+}
+
+/**
+ * Implements hook_node_insert().
+ */
+function fediverse_node_insert(Node $node) {
+  if (!config_get('fediverse.settings', 'enabled')) {
+    return;
+  }
+
+  if ($node->status == NODE_PUBLISHED && _fediverse_type_enabled($node->type)) {
+    module_load_include('inc', 'fediverse', 'includes/fediverse.activity');
+    _fediverse_queue_activity($node, 'Create');
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function fediverse_node_update(Node $node) {
+  if (!config_get('fediverse.settings', 'enabled')) {
+    return;
+  }
+
+  if ($node->status == NODE_PUBLISHED && _fediverse_type_enabled($node->type)) {
+    module_load_include('inc', 'fediverse', 'includes/fediverse.activity');
+    _fediverse_queue_activity($node, 'Update');
+  }
+  elseif ($node->original->status == NODE_PUBLISHED && $node->status == NODE_NOT_PUBLISHED && _fediverse_type_enabled($node->type)) {
+    // Node was unpublished.
+    module_load_include('inc', 'fediverse', 'includes/fediverse.activity');
+    _fediverse_queue_activity($node, 'Delete');
+  }
+}
+
+/**
+ * Check if a content type is enabled for federation.
+ *
+ * @param string $type
+ *   The content type machine name.
+ *
+ * @return bool
+ *   TRUE if the content type is enabled.
+ */
+function _fediverse_type_enabled($type) {
+  $enabled_types = config_get('fediverse.settings', 'content_types');
+  return is_array($enabled_types) && in_array($type, $enabled_types);
+}
+
+/**
+ * Get the site's actor URI.
+ *
+ * @return string
+ *   The full actor URI.
+ */
+function fediverse_get_actor_uri() {
+  global $base_url;
+  return $base_url . '/fediverse/actor';
+}
+
+/**
+ * Get the site's keypair.
+ *
+ * @return array|false
+ *   Array with 'public_key' and 'private_key', or FALSE if not found.
+ */
+function fediverse_get_keypair() {
+  $keypair = db_select('fediverse_keypair', 'k')
+    ->fields('k', array('public_key', 'private_key'))
+    ->orderBy('created', 'DESC')
+    ->range(0, 1)
+    ->execute()
+    ->fetchAssoc();
+
+  return $keypair ?: FALSE;
+}
+
+/**
+ * Get the actor name for WebFinger lookups.
+ *
+ * @return string
+ *   The configured actor name.
+ */
+function fediverse_get_actor_name() {
+  $name = config_get('fediverse.settings', 'actor_name');
+  return !empty($name) ? $name : 'site';
+}
+
+/**
+ * Get the actor display name.
+ *
+ * @return string
+ *   The display name for the actor.
+ */
+function fediverse_get_actor_display_name() {
+  $name = config_get('fediverse.settings', 'actor_display_name');
+  if (!empty($name)) {
+    return $name;
+  }
+  return config_get('system.core', 'site_name');
+}
+
+/**
+ * Get the actor summary/bio.
+ *
+ * @return string
+ *   The summary for the actor.
+ */
+function fediverse_get_actor_summary() {
+  $summary = config_get('fediverse.settings', 'actor_summary');
+  if (!empty($summary)) {
+    return $summary;
+  }
+  return config_get('system.core', 'site_slogan');
+}

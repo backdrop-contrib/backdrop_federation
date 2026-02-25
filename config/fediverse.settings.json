@@ -1,0 +1,8 @@
+{
+    "_config_name": "fediverse.settings",
+    "enabled": false,
+    "actor_name": "site",
+    "actor_display_name": "",
+    "actor_summary": "",
+    "content_types": []
+}

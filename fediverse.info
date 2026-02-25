@@ -1,0 +1,16 @@
+name = Fediverse
+description = Enables one-way ActivityPub federation, allowing Fediverse users to follow this site and receive posts.
+package = Web services
+backdrop = 1.x
+type = module
+
+configure = admin/config/services/fediverse
+
+dependencies[] = node
+
+; Files
+files[] = fediverse.module
+files[] = fediverse.admin.inc
+files[] = fediverse.pages.inc
+files[] = includes/fediverse.http_signature.inc
+files[] = includes/fediverse.activity.inc
