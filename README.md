@@ -6,6 +6,12 @@ The module implements a **one-way outbound publisher** model: the site acts as a
 
 ---
 
+## Installation
+
+Install this module using the official Backdrop CMS instructions. Issues Bugs and feature requests should be reported in the Issue Queue.
+
+
+
 ## Features
 
 - **Site actor** — the site presents itself as an ActivityPub `Application` actor discoverable by `@username@domain` handle
@@ -208,3 +214,11 @@ All endpoints are publicly accessible. The URL paths use `/fediverse/` regardles
 | `/fediverse/outbox` | Published activities |
 | `/fediverse/followers` | Followers collection |
 | `/fediverse/subscribe` | Remote follow form |
+
+Current Maintainer
+------------------
+Tim Erickson (@stpaultim)
+
+License
+-------
+This project is GPL v2 software. See the LICENSE.txt file in this directory for complete text.
