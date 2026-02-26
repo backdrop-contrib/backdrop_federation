@@ -15,17 +15,17 @@
  * @return array
  *   The activity array.
  */
-function fediverse_build_activity(Node $node, $type) {
+function backdrop_federation_build_activity(Node $node, $type) {
   global $base_url;
 
-  $actor_uri = fediverse_get_actor_uri();
+  $actor_uri = backdrop_federation_get_actor_uri();
   $node_url = url('node/' . $node->nid, array('absolute' => TRUE));
 
   // Generate a unique activity ID.
   $activity_id = $base_url . '/fediverse/activity/' . $node->nid . '/' . strtolower($type) . '/' . REQUEST_TIME;
 
   // Build the object (Note or Article).
-  $object = _fediverse_build_object($node);
+  $object = _backdrop_federation_build_object($node);
 
   // For Delete activities, we just need a Tombstone.
   if ($type === 'Delete') {
@@ -58,10 +58,10 @@ function fediverse_build_activity(Node $node, $type) {
  * @return array
  *   The object array.
  */
-function _fediverse_build_object(Node $node) {
+function _backdrop_federation_build_object(Node $node) {
   global $base_url;
 
-  $actor_uri = fediverse_get_actor_uri();
+  $actor_uri = backdrop_federation_get_actor_uri();
   $node_url = url('node/' . $node->nid, array('absolute' => TRUE));
 
   // Determine object type based on node type.
@@ -69,7 +69,7 @@ function _fediverse_build_object(Node $node) {
   $object_type = in_array($node->type, array('article', 'page')) ? 'Article' : 'Note';
 
   // Get the configured text field for this content type, falling back to body.
-  $field_mapping = config_get('fediverse.settings', 'field_mapping');
+  $field_mapping = config_get('backdrop_federation.settings', 'field_mapping');
   $text_field = !empty($field_mapping[$node->type]) ? $field_mapping[$node->type] : 'body';
 
   // Get the body content.
@@ -112,7 +112,7 @@ function _fediverse_build_object(Node $node) {
   }
 
   // Add images if present.
-  $images = _fediverse_get_node_images($node);
+  $images = _backdrop_federation_get_node_images($node);
   if (!empty($images)) {
     $object['attachment'] = $images;
   }
@@ -129,7 +129,7 @@ function _fediverse_build_object(Node $node) {
  * @return array
  *   Array of image attachment objects.
  */
-function _fediverse_get_node_images(Node $node) {
+function _backdrop_federation_get_node_images(Node $node) {
   $images = array();
 
   // Find all image fields on this content type dynamically.
@@ -179,8 +179,8 @@ function _fediverse_get_node_images(Node $node) {
  * @param string $type
  *   The activity type: Create, Update, or Delete.
  */
-function _fediverse_queue_activity(Node $node, $type) {
-  $activity = fediverse_build_activity($node, $type);
+function _backdrop_federation_queue_activity(Node $node, $type) {
+  $activity = backdrop_federation_build_activity($node, $type);
   $json = json_encode($activity, JSON_UNESCAPED_SLASHES);
 
   // Determine object type.
@@ -190,7 +190,7 @@ function _fediverse_queue_activity(Node $node, $type) {
   }
 
   // Store in outbox.
-  $activity_db_id = db_insert('fediverse_outbox')
+  $activity_db_id = db_insert('backdrop_federation_outbox')
     ->fields(array(
       'activity_id' => $activity['id'],
       'activity_type' => $type,
@@ -202,11 +202,11 @@ function _fediverse_queue_activity(Node $node, $type) {
     ->execute();
 
   // Get all followers and queue delivery.
-  $followers = db_select('fediverse_followers', 'f')
+  $followers = db_select('backdrop_federation_followers', 'f')
     ->fields('f', array('inbox_uri', 'shared_inbox_uri'))
     ->execute();
 
-  $queue = BackdropQueue::get('fediverse_activity_delivery');
+  $queue = BackdropQueue::get('backdrop_federation_activity_delivery');
   $queued_inboxes = array();
 
   foreach ($followers as $follower) {
@@ -225,7 +225,7 @@ function _fediverse_queue_activity(Node $node, $type) {
     ));
   }
 
-  watchdog('fediverse', 'Queued @type activity for node @nid to @count inboxes.', array(
+  watchdog('backdrop_federation', 'Queued @type activity for node @nid to @count inboxes.', array(
     '@type' => $type,
     '@nid' => $node->nid,
     '@count' => count($queued_inboxes),

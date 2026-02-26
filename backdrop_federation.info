@@ -1,0 +1,16 @@
+name = Backdrop Federation
+description = Enables ActivityPub federation, allowing Fediverse users to follow this site and receive posts as well as reply, like, and boost them.
+package = Web services
+backdrop = 1.x
+type = module
+
+configure = admin/config/services/fediverse
+
+dependencies[] = node
+
+; Files
+files[] = backdrop_federation.module
+files[] = backdrop_federation.admin.inc
+files[] = backdrop_federation.pages.inc
+files[] = includes/backdrop_federation.http_signature.inc
+files[] = includes/backdrop_federation.activity.inc

@@ -1,0 +1,437 @@
+<?php
+/**
+ * @file
+ * Main module file for Fediverse ActivityPub integration.
+ *
+ * Enables one-way federation allowing Fediverse users to follow this site
+ * and receive posts in their feeds.
+ */
+
+/**
+ * Implements hook_config_info().
+ */
+function backdrop_federation_config_info() {
+  return array(
+    'backdrop_federation.settings' => array(
+      'label' => t('Fediverse settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_permission().
+ */
+function backdrop_federation_permission() {
+  return array(
+    'administer backdrop_federation' => array(
+      'title' => t('Administer Fediverse settings'),
+      'description' => t('Configure ActivityPub federation settings.'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_menu().
+ */
+function backdrop_federation_menu() {
+  $items = array();
+
+  // Admin settings.
+  $items['admin/config/services/fediverse'] = array(
+    'title' => 'Backdrop Federation',
+    'description' => 'Configure Backdrop Federation (ActivityPub) settings.',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_admin_settings_form'),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation.admin.inc',
+  );
+
+  // Default local task — makes "Settings" the first tab.
+  $items['admin/config/services/fediverse/settings'] = array(
+    'title' => 'Settings',
+    'type' => MENU_DEFAULT_LOCAL_TASK,
+    'weight' => -10,
+  );
+
+  // Followers list page — shown as a tab.
+  $items['admin/config/services/fediverse/followers'] = array(
+    'title' => 'Followers',
+    'page callback' => 'backdrop_federation_admin_followers_page',
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 5,
+  );
+
+  // Blocklist admin page — shown as a tab.
+  $items['admin/config/services/fediverse/blocklist'] = array(
+    'title' => 'Blocklist',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_admin_blocklist_form'),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 10,
+  );
+
+  // Blocklist delete confirm.
+  $items['admin/config/services/fediverse/blocklist/delete/%'] = array(
+    'title' => 'Delete blocklist entry',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_admin_blocklist_delete_confirm', 6),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation.admin.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Rate limit admin page — shown as a tab.
+  $items['admin/config/services/fediverse/rate-limit'] = array(
+    'title' => 'Rate Limit',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_admin_rate_limit_form'),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 20,
+  );
+
+  // WebFinger endpoint.
+  $items['.well-known/webfinger'] = array(
+    'page callback' => 'backdrop_federation_webfinger_endpoint',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // NodeInfo discovery.
+  $items['.well-known/nodeinfo'] = array(
+    'page callback' => 'backdrop_federation_nodeinfo_wellknown',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // NodeInfo 2.1 endpoint.
+  $items['nodeinfo/2.1'] = array(
+    'page callback' => 'backdrop_federation_nodeinfo_endpoint',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Actor endpoint.
+  $items['fediverse/actor'] = array(
+    'page callback' => 'backdrop_federation_actor_endpoint',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'backdrop_federation_deliver_activitypub',
+  );
+
+  // Inbox endpoint.
+  $items['fediverse/inbox'] = array(
+    'page callback' => 'backdrop_federation_inbox_endpoint',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'backdrop_federation_deliver_activitypub',
+  );
+
+  // Outbox endpoint.
+  $items['fediverse/outbox'] = array(
+    'page callback' => 'backdrop_federation_outbox_endpoint',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'backdrop_federation_deliver_activitypub',
+  );
+
+  // Followers collection.
+  $items['fediverse/followers'] = array(
+    'page callback' => 'backdrop_federation_followers_endpoint',
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+    'delivery callback' => 'backdrop_federation_deliver_activitypub',
+  );
+
+  // Subscribe page (remote follow form).
+  $items['fediverse/subscribe'] = array(
+    'title' => 'Follow on Fediverse',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_subscribe_form'),
+    'access callback' => TRUE,
+    'file' => 'backdrop_federation.pages.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Delivery callback for ActivityPub JSON responses.
+ *
+ * @param mixed $result
+ *   The page callback result to deliver.
+ */
+function backdrop_federation_deliver_activitypub($result) {
+  if (is_int($result)) {
+    // Handle error codes.
+    switch ($result) {
+      case MENU_NOT_FOUND:
+        backdrop_add_http_header('Status', '404 Not Found');
+        $result = array('error' => 'Not Found');
+        break;
+
+      case MENU_ACCESS_DENIED:
+        backdrop_add_http_header('Status', '403 Forbidden');
+        $result = array('error' => 'Access Denied');
+        break;
+
+      default:
+        backdrop_add_http_header('Status', '500 Internal Server Error');
+        $result = array('error' => 'Internal Server Error');
+    }
+  }
+
+  backdrop_add_http_header('Content-Type', 'application/activity+json');
+  echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+  backdrop_page_footer();
+}
+
+/**
+ * Delivery callback for JSON responses.
+ *
+ * @param mixed $result
+ *   The page callback result to deliver.
+ */
+function backdrop_federation_deliver_json($result) {
+  backdrop_add_http_header('Content-Type', 'application/json');
+  echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+  backdrop_page_footer();
+}
+
+/**
+ * Implements hook_cron_queue_info().
+ */
+function backdrop_federation_cron_queue_info() {
+  return array(
+    'backdrop_federation_activity_delivery' => array(
+      'worker callback' => 'backdrop_federation_deliver_activity_worker',
+      'time' => 60,
+    ),
+  );
+}
+
+/**
+ * Queue worker to deliver activities to follower inboxes.
+ *
+ * @param array $data
+ *   Queue item data containing activity_id and inbox_uri.
+ */
+function backdrop_federation_deliver_activity_worker($data) {
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.activity');
+
+  $activity = db_select('backdrop_federation_outbox', 'o')
+    ->fields('o', array('activity_json'))
+    ->condition('id', $data['activity_id'])
+    ->execute()
+    ->fetchField();
+
+  if (!$activity) {
+    watchdog('backdrop_federation', 'Activity @id not found for delivery.', array('@id' => $data['activity_id']), WATCHDOG_WARNING);
+    return;
+  }
+
+  $result = backdrop_federation_post_to_inbox($data['inbox_uri'], $activity);
+
+  if ($result === FALSE) {
+    watchdog('backdrop_federation', 'Failed to deliver activity to @inbox', array('@inbox' => $data['inbox_uri']), WATCHDOG_WARNING);
+  }
+}
+
+/**
+ * Implements hook_cron().
+ */
+function backdrop_federation_cron() {
+  // Clean up stale rate limit rows (older than 10× the window).
+  $window = (int) config_get('backdrop_federation.settings', 'rate_limit_window');
+  if (!$window) {
+    $window = 60;
+  }
+  db_delete('backdrop_federation_rate_limit')
+    ->condition('window_start', REQUEST_TIME - ($window * 10), '<')
+    ->execute();
+}
+
+/**
+ * Implements hook_node_view().
+ */
+function backdrop_federation_node_view(Node $node, $view_mode, $langcode) {
+  if ($view_mode !== 'full' && $view_mode !== 'teaser') {
+    return;
+  }
+
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
+    return;
+  }
+
+  if (!_backdrop_federation_type_enabled($node->type)) {
+    return;
+  }
+
+  if ($view_mode === 'full') {
+    $node->content['links']['backdrop_federation'] = array(
+      '#theme' => 'links__node__backdrop_federation',
+      '#links' => array(
+        'backdrop-federation-subscribe' => array(
+          'title' => t('➕ Follow on Fediverse'),
+          'href' => 'fediverse/subscribe',
+        ),
+      ),
+      '#attributes' => array('class' => array('links', 'inline')),
+    );
+  }
+
+  $like_count = db_select('backdrop_federation_reactions', 'r')
+    ->condition('nid', $node->nid)
+    ->condition('type', 'Like')
+    ->countQuery()->execute()->fetchField();
+
+  $announce_count = db_select('backdrop_federation_reactions', 'r')
+    ->condition('nid', $node->nid)
+    ->condition('type', 'Announce')
+    ->countQuery()->execute()->fetchField();
+
+  if ($like_count > 0 || $announce_count > 0) {
+    $parts = array();
+    if ($like_count > 0) {
+      $label = format_plural($like_count, '1 like', '@count likes');
+      $parts[] = '<span aria-label="' . $label . '" title="' . $label . '">♥ ' . $like_count . '</span>';
+    }
+    if ($announce_count > 0) {
+      $label = format_plural($announce_count, '1 boost', '@count boosts');
+      $parts[] = '<span aria-label="' . $label . '" title="' . $label . '">↺ ' . $announce_count . '</span>';
+    }
+    $node->content['backdrop_federation_reactions'] = array(
+      '#markup' => '<p class="backdrop-federation-reactions">' . implode(' &middot; ', $parts) . '</p>',
+      '#weight' => 10,
+    );
+  }
+}
+
+/**
+ * Implements hook_node_insert().
+ */
+function backdrop_federation_node_insert(Node $node) {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
+    return;
+  }
+
+  if ($node->status == NODE_PUBLISHED && _backdrop_federation_type_enabled($node->type)) {
+    module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.activity');
+    _backdrop_federation_queue_activity($node, 'Create');
+  }
+}
+
+/**
+ * Implements hook_node_update().
+ */
+function backdrop_federation_node_update(Node $node) {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
+    return;
+  }
+
+  if ($node->status == NODE_PUBLISHED && _backdrop_federation_type_enabled($node->type)) {
+    module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.activity');
+    _backdrop_federation_queue_activity($node, 'Update');
+  }
+  elseif ($node->original->status == NODE_PUBLISHED && $node->status == NODE_NOT_PUBLISHED && _backdrop_federation_type_enabled($node->type)) {
+    // Node was unpublished.
+    module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.activity');
+    _backdrop_federation_queue_activity($node, 'Delete');
+  }
+}
+
+/**
+ * Check if a content type is enabled for federation.
+ *
+ * @param string $type
+ *   The content type machine name.
+ *
+ * @return bool
+ *   TRUE if the content type is enabled.
+ */
+function _backdrop_federation_type_enabled($type) {
+  $enabled_types = config_get('backdrop_federation.settings', 'content_types');
+  return is_array($enabled_types) && in_array($type, $enabled_types);
+}
+
+/**
+ * Get the site's actor URI.
+ *
+ * @return string
+ *   The full actor URI.
+ */
+function backdrop_federation_get_actor_uri() {
+  global $base_url;
+  return $base_url . '/fediverse/actor';
+}
+
+/**
+ * Get the site's keypair.
+ *
+ * @return array|false
+ *   Array with 'public_key' and 'private_key', or FALSE if not found.
+ */
+function backdrop_federation_get_keypair() {
+  $keypair = db_select('backdrop_federation_keypair', 'k')
+    ->fields('k', array('public_key', 'private_key'))
+    ->orderBy('created', 'DESC')
+    ->range(0, 1)
+    ->execute()
+    ->fetchAssoc();
+
+  return $keypair ?: FALSE;
+}
+
+/**
+ * Get the actor name for WebFinger lookups.
+ *
+ * @return string
+ *   The configured actor name.
+ */
+function backdrop_federation_get_actor_name() {
+  $name = config_get('backdrop_federation.settings', 'actor_name');
+  return !empty($name) ? $name : 'site';
+}
+
+/**
+ * Get the actor display name.
+ *
+ * @return string
+ *   The display name for the actor.
+ */
+function backdrop_federation_get_actor_display_name() {
+  $name = config_get('backdrop_federation.settings', 'actor_display_name');
+  if (!empty($name)) {
+    return $name;
+  }
+  return config_get('system.core', 'site_name');
+}
+
+/**
+ * Get the actor summary/bio.
+ *
+ * @return string
+ *   The summary for the actor.
+ */
+function backdrop_federation_get_actor_summary() {
+  $summary = config_get('backdrop_federation.settings', 'actor_summary');
+  if (!empty($summary)) {
+    return $summary;
+  }
+  return config_get('system.core', 'site_slogan');
+}

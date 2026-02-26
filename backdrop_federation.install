@@ -1,0 +1,594 @@
+<?php
+/**
+ * @file
+ * Install, update, and uninstall functions for the Fediverse module.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function backdrop_federation_schema() {
+  $schema = array();
+
+  $schema['backdrop_federation_followers'] = array(
+    'description' => 'Stores followers from the Fediverse.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'actor_uri' => array(
+        'description' => 'Remote follower actor URI.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'inbox_uri' => array(
+        'description' => 'Follower inbox for delivery.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'shared_inbox_uri' => array(
+        'description' => 'Shared inbox (optional).',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => FALSE,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when follower was added.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'indexes' => array(
+      'actor_uri' => array(array('actor_uri', 255)),
+    ),
+  );
+
+  $schema['backdrop_federation_keypair'] = array(
+    'description' => 'Stores RSA keypair for signing ActivityPub requests.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'public_key' => array(
+        'description' => 'PEM-encoded RSA public key.',
+        'type' => 'text',
+        'size' => 'medium',
+        'not null' => TRUE,
+      ),
+      'private_key' => array(
+        'description' => 'PEM-encoded RSA private key.',
+        'type' => 'text',
+        'size' => 'medium',
+        'not null' => TRUE,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when keypair was generated.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+  );
+
+  $schema['backdrop_federation_outbox'] = array(
+    'description' => 'Stores outgoing ActivityPub activities.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'activity_id' => array(
+        'description' => 'Activity URI.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'activity_type' => array(
+        'description' => 'Activity type (Create, Update, Delete).',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+      ),
+      'object_type' => array(
+        'description' => 'Object type (Note, Article).',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+      ),
+      'nid' => array(
+        'description' => 'Related node ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => FALSE,
+      ),
+      'activity_json' => array(
+        'description' => 'Full JSON activity.',
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => TRUE,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when activity was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'indexes' => array(
+      'activity_id' => array(array('activity_id', 255)),
+      'nid' => array('nid'),
+      'created' => array('created'),
+    ),
+  );
+
+  $schema['backdrop_federation_received'] = array(
+    'description' => 'Tracks incoming ActivityPub objects saved as Backdrop comments.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'object_id' => array(
+        'description' => 'ActivityPub object URI (unique).',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'cid' => array(
+        'description' => 'Backdrop comment ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'nid' => array(
+        'description' => 'Node ID the comment belongs to.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when the record was created.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'unique keys' => array(
+      'object_id' => array(array('object_id', 255)),
+    ),
+    'indexes' => array(
+      'cid' => array('cid'),
+      'nid' => array('nid'),
+    ),
+  );
+
+  $schema['backdrop_federation_blocklist'] = array(
+    'description' => 'Stores blocked actors and domains for the fediverse inbox.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'value' => array(
+        'description' => 'Actor URI or domain name.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+      ),
+      'type' => array(
+        'description' => 'Entry type: actor or domain.',
+        'type' => 'varchar',
+        'length' => 16,
+        'not null' => TRUE,
+      ),
+      'note' => array(
+        'description' => 'Optional admin note.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => FALSE,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when entry was added.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'unique keys' => array(
+      'value_type' => array('value', 'type'),
+    ),
+    'indexes' => array(
+      'type' => array('type'),
+    ),
+  );
+
+  $schema['backdrop_federation_rate_limit'] = array(
+    'description' => 'Tracks per-actor inbox request counts for rate limiting.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'actor_uri' => array(
+        'description' => 'Full actor URI.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'request_count' => array(
+        'description' => 'Number of requests in the current window.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'window_start' => array(
+        'description' => 'Unix timestamp of current window start.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'unique keys' => array(
+      'actor_uri' => array(array('actor_uri', 255)),
+    ),
+  );
+
+  $schema['backdrop_federation_reactions'] = array(
+    'description' => 'Stores Like and Announce reactions from fediverse actors.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'nid' => array(
+        'description' => 'Node ID.',
+        'type' => 'int',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'actor_uri' => array(
+        'description' => 'Actor who reacted.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'type' => array(
+        'description' => 'Reaction type: Like or Announce.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+      ),
+      'created' => array(
+        'description' => 'Timestamp when reaction was recorded.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'unique keys' => array(
+      'nid_actor_type' => array('nid', array('actor_uri', 255), 'type'),
+    ),
+    'indexes' => array(
+      'nid' => array('nid'),
+    ),
+  );
+
+  return $schema;
+}
+
+/**
+ * Implements hook_install().
+ */
+function backdrop_federation_install() {
+  // Generate RSA keypair.
+  _backdrop_federation_generate_keypair();
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function backdrop_federation_uninstall() {
+  // Config is automatically deleted by Backdrop.
+}
+
+/**
+ * Implements hook_requirements().
+ */
+function backdrop_federation_requirements($phase) {
+  $requirements = array();
+  $t = get_t();
+
+  if ($phase == 'runtime') {
+    // Check for OpenSSL extension.
+    $requirements['backdrop_federation_openssl'] = array(
+      'title' => $t('Fediverse OpenSSL'),
+      'value' => extension_loaded('openssl') ? $t('Enabled') : $t('Disabled'),
+      'severity' => extension_loaded('openssl') ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+    );
+
+    if (!extension_loaded('openssl')) {
+      $requirements['backdrop_federation_openssl']['description'] = $t('The Fediverse module requires the OpenSSL PHP extension for HTTP signature support.');
+    }
+
+    // Check for keypair.
+    $keypair = db_select('backdrop_federation_keypair', 'k')
+      ->fields('k', array('id'))
+      ->execute()
+      ->fetchField();
+
+    $requirements['backdrop_federation_keypair'] = array(
+      'title' => $t('Fediverse keypair'),
+      'value' => $keypair ? $t('Generated') : $t('Missing'),
+      'severity' => $keypair ? REQUIREMENT_OK : REQUIREMENT_WARNING,
+    );
+
+    if (!$keypair) {
+      $requirements['backdrop_federation_keypair']['description'] = $t('No RSA keypair found. Try disabling and re-enabling the module.');
+    }
+  }
+
+  return $requirements;
+}
+
+/**
+ * Generate and store an RSA keypair.
+ */
+function _backdrop_federation_generate_keypair() {
+  if (!extension_loaded('openssl')) {
+    watchdog('backdrop_federation', 'OpenSSL extension not available. Cannot generate keypair.', array(), WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  $config = array(
+    'private_key_bits' => 2048,
+    'private_key_type' => OPENSSL_KEYTYPE_RSA,
+  );
+
+  $key = openssl_pkey_new($config);
+  if (!$key) {
+    watchdog('backdrop_federation', 'Failed to generate RSA keypair.', array(), WATCHDOG_ERROR);
+    return FALSE;
+  }
+
+  // Export private key.
+  openssl_pkey_export($key, $private_key);
+
+  // Export public key.
+  $details = openssl_pkey_get_details($key);
+  $public_key = $details['key'];
+
+  // Store in database.
+  db_insert('backdrop_federation_keypair')
+    ->fields(array(
+      'public_key' => $public_key,
+      'private_key' => $private_key,
+      'created' => REQUEST_TIME,
+    ))
+    ->execute();
+
+  watchdog('backdrop_federation', 'RSA keypair generated successfully.', array(), WATCHDOG_INFO);
+  return TRUE;
+}
+
+/**
+ * Add backdrop_federation_blocklist and backdrop_federation_rate_limit tables for anti-abuse.
+ */
+function backdrop_federation_update_7003() {
+  if (!db_table_exists('backdrop_federation_blocklist')) {
+    $schema = array(
+      'description' => 'Stores blocked actors and domains for the fediverse inbox.',
+      'fields' => array(
+        'id' => array(
+          'description' => 'Primary key.',
+          'type' => 'serial',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ),
+        'value' => array(
+          'description' => 'Actor URI or domain name.',
+          'type' => 'varchar',
+          'length' => 255,
+          'not null' => TRUE,
+        ),
+        'type' => array(
+          'description' => 'Entry type: actor or domain.',
+          'type' => 'varchar',
+          'length' => 16,
+          'not null' => TRUE,
+        ),
+        'note' => array(
+          'description' => 'Optional admin note.',
+          'type' => 'varchar',
+          'length' => 255,
+          'not null' => FALSE,
+        ),
+        'created' => array(
+          'description' => 'Timestamp when entry was added.',
+          'type' => 'int',
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+      ),
+      'primary key' => array('id'),
+      'unique keys' => array(
+        'value_type' => array('value', 'type'),
+      ),
+      'indexes' => array(
+        'type' => array('type'),
+      ),
+    );
+    db_create_table('backdrop_federation_blocklist', $schema);
+  }
+
+  if (!db_table_exists('backdrop_federation_rate_limit')) {
+    $schema = array(
+      'description' => 'Tracks per-actor inbox request counts for rate limiting.',
+      'fields' => array(
+        'id' => array(
+          'description' => 'Primary key.',
+          'type' => 'serial',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ),
+        'actor_uri' => array(
+          'description' => 'Full actor URI.',
+          'type' => 'varchar',
+          'length' => 2048,
+          'not null' => TRUE,
+        ),
+        'request_count' => array(
+          'description' => 'Number of requests in the current window.',
+          'type' => 'int',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+        'window_start' => array(
+          'description' => 'Unix timestamp of current window start.',
+          'type' => 'int',
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+      ),
+      'primary key' => array('id'),
+      'unique keys' => array(
+        'actor_uri' => array(array('actor_uri', 255)),
+      ),
+    );
+    db_create_table('backdrop_federation_rate_limit', $schema);
+  }
+}
+
+/**
+ * Add backdrop_federation_reactions table for Like and Announce counts.
+ */
+function backdrop_federation_update_7002() {
+  if (!db_table_exists('backdrop_federation_reactions')) {
+    $schema = array(
+      'description' => 'Stores Like and Announce reactions from fediverse actors.',
+      'fields' => array(
+        'id' => array(
+          'description' => 'Primary key.',
+          'type' => 'serial',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ),
+        'nid' => array(
+          'description' => 'Node ID.',
+          'type' => 'int',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ),
+        'actor_uri' => array(
+          'description' => 'Actor who reacted.',
+          'type' => 'varchar',
+          'length' => 2048,
+          'not null' => TRUE,
+        ),
+        'type' => array(
+          'description' => 'Reaction type: Like or Announce.',
+          'type' => 'varchar',
+          'length' => 32,
+          'not null' => TRUE,
+        ),
+        'created' => array(
+          'description' => 'Timestamp when reaction was recorded.',
+          'type' => 'int',
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+      ),
+      'primary key' => array('id'),
+      'unique keys' => array(
+        'nid_actor_type' => array('nid', array('actor_uri', 255), 'type'),
+      ),
+      'indexes' => array(
+        'nid' => array('nid'),
+      ),
+    );
+    db_create_table('backdrop_federation_reactions', $schema);
+  }
+}
+
+/**
+ * Add backdrop_federation_received table for tracking incoming replies as comments.
+ */
+function backdrop_federation_update_7001() {
+  if (!db_table_exists('backdrop_federation_received')) {
+    $schema = array(
+      'description' => 'Tracks incoming ActivityPub objects saved as Backdrop comments.',
+      'fields' => array(
+        'id' => array(
+          'description' => 'Primary key.',
+          'type' => 'serial',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+        ),
+        'object_id' => array(
+          'description' => 'ActivityPub object URI (unique).',
+          'type' => 'varchar',
+          'length' => 2048,
+          'not null' => TRUE,
+        ),
+        'cid' => array(
+          'description' => 'Backdrop comment ID.',
+          'type' => 'int',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+        'nid' => array(
+          'description' => 'Node ID the comment belongs to.',
+          'type' => 'int',
+          'unsigned' => TRUE,
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+        'created' => array(
+          'description' => 'Timestamp when the record was created.',
+          'type' => 'int',
+          'not null' => TRUE,
+          'default' => 0,
+        ),
+      ),
+      'primary key' => array('id'),
+      'unique keys' => array(
+        'object_id' => array(array('object_id', 255)),
+      ),
+      'indexes' => array(
+        'cid' => array('cid'),
+        'nid' => array('nid'),
+      ),
+    );
+    db_create_table('backdrop_federation_received', $schema);
+  }
+}

@@ -1,5 +1,5 @@
 {
-    "_config_name": "fediverse.settings",
+    "_config_name": "backdrop_federation.settings",
     "enabled": false,
     "actor_name": "site",
     "actor_display_name": "",
@@ -7,5 +7,7 @@
     "content_types": [],
     "field_mapping": {},
     "accept_replies": false,
-    "comment_moderation": false
+    "comment_moderation": false,
+    "rate_limit_requests": 20,
+    "rate_limit_window": 60
 }

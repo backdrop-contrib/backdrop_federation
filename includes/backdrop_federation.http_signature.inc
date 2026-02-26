@@ -17,10 +17,10 @@
  * @return array|false
  *   Array of headers to include, or FALSE on failure.
  */
-function fediverse_sign_request($url, $body, $method = 'POST') {
-  $keypair = fediverse_get_keypair();
+function backdrop_federation_sign_request($url, $body, $method = 'POST') {
+  $keypair = backdrop_federation_get_keypair();
   if (!$keypair) {
-    watchdog('fediverse', 'No keypair available for signing.', array(), WATCHDOG_ERROR);
+    watchdog('backdrop_federation', 'No keypair available for signing.', array(), WATCHDOG_ERROR);
     return FALSE;
   }
 
@@ -47,7 +47,7 @@ function fediverse_sign_request($url, $body, $method = 'POST') {
   // Sign the string.
   $private_key = openssl_pkey_get_private($keypair['private_key']);
   if (!$private_key) {
-    watchdog('fediverse', 'Failed to load private key for signing.', array(), WATCHDOG_ERROR);
+    watchdog('backdrop_federation', 'Failed to load private key for signing.', array(), WATCHDOG_ERROR);
     return FALSE;
   }
 
@@ -55,14 +55,14 @@ function fediverse_sign_request($url, $body, $method = 'POST') {
   $success = openssl_sign($signing_string, $signature, $private_key, OPENSSL_ALGO_SHA256);
 
   if (!$success) {
-    watchdog('fediverse', 'Failed to sign request.', array(), WATCHDOG_ERROR);
+    watchdog('backdrop_federation', 'Failed to sign request.', array(), WATCHDOG_ERROR);
     return FALSE;
   }
 
   $signature_b64 = base64_encode($signature);
 
   // Build the Signature header.
-  $key_id = fediverse_get_actor_uri() . '#main-key';
+  $key_id = backdrop_federation_get_actor_uri() . '#main-key';
   $signature_header = sprintf(
     'keyId="%s",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="%s"',
     $key_id,
@@ -85,41 +85,41 @@ function fediverse_sign_request($url, $body, $method = 'POST') {
  * @return bool
  *   TRUE if the signature is valid, FALSE otherwise.
  */
-function fediverse_verify_signature() {
+function backdrop_federation_verify_signature() {
   // Get the Signature header.
   $signature_header = isset($_SERVER['HTTP_SIGNATURE']) ? $_SERVER['HTTP_SIGNATURE'] : '';
 
   if (empty($signature_header)) {
-    watchdog('fediverse', 'No Signature header in request.', array(), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'No Signature header in request.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
 
   // Parse the Signature header.
-  $params = _fediverse_parse_signature_header($signature_header);
+  $params = _backdrop_federation_parse_signature_header($signature_header);
 
   if (!isset($params['keyId'], $params['signature'], $params['headers'])) {
-    watchdog('fediverse', 'Invalid Signature header format.', array(), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Invalid Signature header format.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
 
   // Replay protection: reject requests whose Date header is outside ±5 minutes.
   $date_header = isset($_SERVER['HTTP_DATE']) ? $_SERVER['HTTP_DATE'] : '';
   if (empty($date_header)) {
-    watchdog('fediverse', 'Missing Date header in signed request.', array(), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Missing Date header in signed request.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
   $request_time = strtotime($date_header);
   if ($request_time === FALSE || abs(REQUEST_TIME - $request_time) > 300) {
-    watchdog('fediverse', 'Request Date header is too old, too far in the future, or invalid: @date', array(
+    watchdog('backdrop_federation', 'Request Date header is too old, too far in the future, or invalid: @date', array(
       '@date' => $date_header,
     ), WATCHDOG_WARNING);
     return FALSE;
   }
 
   // Fetch the public key.
-  $public_key = _fediverse_fetch_public_key($params['keyId']);
+  $public_key = _backdrop_federation_fetch_public_key($params['keyId']);
   if (!$public_key) {
-    watchdog('fediverse', 'Could not fetch public key from @keyId', array('@keyId' => $params['keyId']), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Could not fetch public key from @keyId', array('@keyId' => $params['keyId']), WATCHDOG_WARNING);
     return FALSE;
   }
 
@@ -151,7 +151,7 @@ function fediverse_verify_signature() {
   $key = openssl_pkey_get_public($public_key);
 
   if (!$key) {
-    watchdog('fediverse', 'Invalid public key format.', array(), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Invalid public key format.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
 
@@ -161,11 +161,11 @@ function fediverse_verify_signature() {
     return TRUE;
   }
   elseif ($result === 0) {
-    watchdog('fediverse', 'Signature verification failed.', array(), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Signature verification failed.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
   else {
-    watchdog('fediverse', 'Error during signature verification: @error', array(
+    watchdog('backdrop_federation', 'Error during signature verification: @error', array(
       '@error' => openssl_error_string(),
     ), WATCHDOG_WARNING);
     return FALSE;
@@ -181,7 +181,7 @@ function fediverse_verify_signature() {
  * @return array
  *   Associative array of signature parameters.
  */
-function _fediverse_parse_signature_header($header) {
+function _backdrop_federation_parse_signature_header($header) {
   $params = array();
 
   // Match key="value" pairs.
@@ -203,7 +203,7 @@ function _fediverse_parse_signature_header($header) {
  * @return string|false
  *   The PEM-encoded public key, or FALSE on failure.
  */
-function _fediverse_fetch_public_key($key_id) {
+function _backdrop_federation_fetch_public_key($key_id) {
   // Remove the fragment to get the actor URL.
   $actor_uri = preg_replace('/#.*$/', '', $key_id);
 
@@ -216,20 +216,20 @@ function _fediverse_fetch_public_key($key_id) {
   $response = backdrop_http_request($actor_uri, $options);
 
   if ($response->code != 200) {
-    watchdog('fediverse', 'Failed to fetch actor for key verification: @code', array('@code' => $response->code), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Failed to fetch actor for key verification: @code', array('@code' => $response->code), WATCHDOG_WARNING);
     return FALSE;
   }
 
   $data = json_decode($response->data, TRUE);
 
   if (!isset($data['publicKey']['publicKeyPem'])) {
-    watchdog('fediverse', 'Actor has no publicKey.', array(), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Actor has no publicKey.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
 
   // Verify the key ID matches.
   if (isset($data['publicKey']['id']) && $data['publicKey']['id'] !== $key_id) {
-    watchdog('fediverse', 'Key ID mismatch: expected @expected, got @got', array(
+    watchdog('backdrop_federation', 'Key ID mismatch: expected @expected, got @got', array(
       '@expected' => $key_id,
       '@got' => $data['publicKey']['id'],
     ), WATCHDOG_WARNING);
@@ -250,8 +250,8 @@ function _fediverse_fetch_public_key($key_id) {
  * @return bool
  *   TRUE on success, FALSE on failure.
  */
-function fediverse_post_to_inbox($inbox_uri, $json) {
-  $headers = fediverse_sign_request($inbox_uri, $json, 'POST');
+function backdrop_federation_post_to_inbox($inbox_uri, $json) {
+  $headers = backdrop_federation_sign_request($inbox_uri, $json, 'POST');
 
   if (!$headers) {
     return FALSE;
@@ -266,11 +266,11 @@ function fediverse_post_to_inbox($inbox_uri, $json) {
   $response = backdrop_http_request($inbox_uri, $options);
 
   if ($response->code >= 200 && $response->code < 300) {
-    watchdog('fediverse', 'Successfully posted to @inbox', array('@inbox' => $inbox_uri), WATCHDOG_DEBUG);
+    watchdog('backdrop_federation', 'Successfully posted to @inbox', array('@inbox' => $inbox_uri), WATCHDOG_DEBUG);
     return TRUE;
   }
 
-  watchdog('fediverse', 'Failed to post to @inbox: @code @error', array(
+  watchdog('backdrop_federation', 'Failed to post to @inbox: @code @error', array(
     '@inbox' => $inbox_uri,
     '@code' => $response->code,
     '@error' => isset($response->error) ? $response->error : '',

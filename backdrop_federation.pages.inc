@@ -9,7 +9,7 @@
  *
  * Handles /.well-known/webfinger requests for actor discovery.
  */
-function fediverse_webfinger_endpoint() {
+function backdrop_federation_webfinger_endpoint() {
   $resource = isset($_GET['resource']) ? $_GET['resource'] : '';
 
   if (empty($resource)) {
@@ -32,7 +32,7 @@ function fediverse_webfinger_endpoint() {
 
   global $base_url;
   $host = parse_url($base_url, PHP_URL_HOST);
-  $actor_name = fediverse_get_actor_name();
+  $actor_name = backdrop_federation_get_actor_name();
 
   // Check if this is our actor.
   if ($name !== $actor_name || $domain !== $host) {
@@ -46,13 +46,13 @@ function fediverse_webfinger_endpoint() {
   $result = array(
     'subject' => $resource,
     'aliases' => array(
-      fediverse_get_actor_uri(),
+      backdrop_federation_get_actor_uri(),
     ),
     'links' => array(
       array(
         'rel' => 'self',
         'type' => 'application/activity+json',
-        'href' => fediverse_get_actor_uri(),
+        'href' => backdrop_federation_get_actor_uri(),
       ),
       array(
         'rel' => 'http://ostatus.org/schema/1.0/subscribe',
@@ -72,7 +72,7 @@ function fediverse_webfinger_endpoint() {
  *
  * Returns links to NodeInfo endpoints.
  */
-function fediverse_nodeinfo_wellknown() {
+function backdrop_federation_nodeinfo_wellknown() {
   global $base_url;
 
   $result = array(
@@ -95,7 +95,7 @@ function fediverse_nodeinfo_wellknown() {
  *
  * Returns server metadata.
  */
-function fediverse_nodeinfo_endpoint() {
+function backdrop_federation_nodeinfo_endpoint() {
   // Count users (active users who can create content).
   $user_count = db_select('users', 'u')
     ->condition('status', 1)
@@ -141,22 +141,22 @@ function fediverse_nodeinfo_endpoint() {
  *
  * Returns the ActivityStreams Actor for this site.
  */
-function fediverse_actor_endpoint() {
-  if (!config_get('fediverse.settings', 'enabled')) {
+function backdrop_federation_actor_endpoint() {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
     return MENU_NOT_FOUND;
   }
 
-  $keypair = fediverse_get_keypair();
+  $keypair = backdrop_federation_get_keypair();
   if (!$keypair) {
-    watchdog('fediverse', 'No keypair available for actor endpoint.', array(), WATCHDOG_ERROR);
+    watchdog('backdrop_federation', 'No keypair available for actor endpoint.', array(), WATCHDOG_ERROR);
     return MENU_NOT_FOUND;
   }
 
   global $base_url;
-  $actor_uri = fediverse_get_actor_uri();
+  $actor_uri = backdrop_federation_get_actor_uri();
 
   // Get the actor's published date from when the keypair was first created.
-  $actor_created = db_select('fediverse_keypair', 'k')
+  $actor_created = db_select('backdrop_federation_keypair', 'k')
     ->fields('k', array('created'))
     ->orderBy('created', 'ASC')
     ->range(0, 1)
@@ -174,9 +174,9 @@ function fediverse_actor_endpoint() {
     ),
     'id' => $actor_uri,
     'type' => 'Application',
-    'preferredUsername' => fediverse_get_actor_name(),
-    'name' => fediverse_get_actor_display_name(),
-    'summary' => check_plain(fediverse_get_actor_summary()),
+    'preferredUsername' => backdrop_federation_get_actor_name(),
+    'name' => backdrop_federation_get_actor_display_name(),
+    'summary' => check_plain(backdrop_federation_get_actor_summary()),
     'url' => $base_url,
     'published' => $actor_created ? gmdate('c', $actor_created) : NULL,
     'inbox' => $base_url . '/fediverse/inbox',
@@ -210,8 +210,8 @@ function fediverse_actor_endpoint() {
  *
  * Receives and processes incoming ActivityPub activities.
  */
-function fediverse_inbox_endpoint() {
-  if (!config_get('fediverse.settings', 'enabled')) {
+function backdrop_federation_inbox_endpoint() {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
     return MENU_NOT_FOUND;
   }
 
@@ -232,36 +232,60 @@ function fediverse_inbox_endpoint() {
   }
 
   // Verify HTTP signature.
-  module_load_include('inc', 'fediverse', 'includes/fediverse.http_signature');
-  if (!fediverse_verify_signature()) {
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+  if (!backdrop_federation_verify_signature()) {
     backdrop_add_http_header('Status', '401 Unauthorized');
     return array('error' => 'Invalid signature');
+  }
+
+  // Blocklist check.
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  if ($actor_uri && _backdrop_federation_is_blocked($actor_uri)) {
+    backdrop_add_http_header('Status', '403 Forbidden');
+    return array('error' => 'Forbidden');
+  }
+
+  // Rate limit check.
+  if ($actor_uri && !_backdrop_federation_check_rate_limit($actor_uri)) {
+    backdrop_add_http_header('Status', '429 Too Many Requests');
+    backdrop_add_http_header('Retry-After', '60');
+    return array('error' => 'Too Many Requests');
   }
 
   // Process the activity.
   switch ($activity['type']) {
     case 'Follow':
-      return _fediverse_handle_follow($activity);
+      return _backdrop_federation_handle_follow($activity);
+
+    case 'Like':
+      return _backdrop_federation_handle_like($activity);
+
+    case 'Announce':
+      return _backdrop_federation_handle_announce($activity);
 
     case 'Undo':
-      if (isset($activity['object']['type']) && $activity['object']['type'] === 'Follow') {
-        return _fediverse_handle_undo_follow($activity);
+      $undo_type = isset($activity['object']['type']) ? $activity['object']['type'] : '';
+      if ($undo_type === 'Follow') {
+        return _backdrop_federation_handle_undo_follow($activity);
+      }
+      if ($undo_type === 'Like' || $undo_type === 'Announce') {
+        return _backdrop_federation_handle_undo_reaction($activity, $undo_type);
       }
       break;
 
     case 'Create':
-      return _fediverse_handle_create($activity);
+      return _backdrop_federation_handle_create($activity);
 
     case 'Update':
-      return _fediverse_handle_update($activity);
+      return _backdrop_federation_handle_update($activity);
 
     case 'Delete':
-      return _fediverse_handle_delete($activity);
+      return _backdrop_federation_handle_delete($activity);
 
     case 'Accept':
     case 'Reject':
       // Acknowledgements - just log and accept.
-      watchdog('fediverse', 'Received @type activity from @actor', array(
+      watchdog('backdrop_federation', 'Received @type activity from @actor', array(
         '@type' => $activity['type'],
         '@actor' => $activity['actor'],
       ), WATCHDOG_DEBUG);
@@ -269,7 +293,266 @@ function fediverse_inbox_endpoint() {
   }
 
   // Unknown activity type - accept but don't process.
-  watchdog('fediverse', 'Received unhandled activity type: @type', array('@type' => $activity['type']), WATCHDOG_DEBUG);
+  watchdog('backdrop_federation', 'Received unhandled activity type: @type', array('@type' => $activity['type']), WATCHDOG_DEBUG);
+  return array('status' => 'ok');
+}
+
+/**
+ * Check if an actor URI is on the blocklist.
+ *
+ * @param string $actor_uri
+ *   The actor URI to check.
+ *
+ * @return bool
+ *   TRUE if the actor or its domain is blocked.
+ */
+function _backdrop_federation_is_blocked($actor_uri) {
+  // Check exact actor URI match.
+  $blocked = db_select('backdrop_federation_blocklist', 'b')
+    ->fields('b', array('id'))
+    ->condition('value', $actor_uri)
+    ->condition('type', 'actor')
+    ->execute()
+    ->fetchField();
+
+  if ($blocked !== FALSE) {
+    return TRUE;
+  }
+
+  // Check domain match.
+  $domain = parse_url($actor_uri, PHP_URL_HOST);
+  if ($domain) {
+    $blocked = db_select('backdrop_federation_blocklist', 'b')
+      ->fields('b', array('id'))
+      ->condition('value', $domain)
+      ->condition('type', 'domain')
+      ->execute()
+      ->fetchField();
+
+    if ($blocked !== FALSE) {
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
+/**
+ * Check and update the rate limit for an actor.
+ *
+ * @param string $actor_uri
+ *   The actor URI to check.
+ *
+ * @return bool
+ *   TRUE if the request is within the rate limit, FALSE if exceeded.
+ */
+function _backdrop_federation_check_rate_limit($actor_uri) {
+  $limit = (int) config_get('backdrop_federation.settings', 'rate_limit_requests');
+  if (!$limit) {
+    $limit = 20;
+  }
+  $window = (int) config_get('backdrop_federation.settings', 'rate_limit_window');
+  if (!$window) {
+    $window = 60;
+  }
+
+  $record = db_select('backdrop_federation_rate_limit', 'r')
+    ->fields('r', array('id', 'request_count', 'window_start'))
+    ->condition('actor_uri', $actor_uri)
+    ->execute()
+    ->fetchObject();
+
+  $now = REQUEST_TIME;
+
+  if (!$record || ($now - $record->window_start) >= $window) {
+    // No record or window expired — start a fresh window.
+    db_merge('backdrop_federation_rate_limit')
+      ->key(array('actor_uri' => $actor_uri))
+      ->fields(array(
+        'actor_uri' => $actor_uri,
+        'request_count' => 1,
+        'window_start' => $now,
+      ))
+      ->execute();
+    return TRUE;
+  }
+
+  if ($record->request_count >= $limit) {
+    watchdog('backdrop_federation', 'Rate limit exceeded for actor @actor (@count requests in @window seconds)', array(
+      '@actor' => $actor_uri,
+      '@count' => $record->request_count,
+      '@window' => $window,
+    ), WATCHDOG_WARNING);
+    return FALSE;
+  }
+
+  // Increment within current window.
+  db_update('backdrop_federation_rate_limit')
+    ->expression('request_count', 'request_count + 1')
+    ->condition('actor_uri', $actor_uri)
+    ->execute();
+
+  return TRUE;
+}
+
+/**
+ * Handle a Like activity.
+ */
+function _backdrop_federation_handle_like($activity) {
+  return _backdrop_federation_handle_reaction($activity, 'Like');
+}
+
+/**
+ * Handle an Announce (boost) activity.
+ */
+function _backdrop_federation_handle_announce($activity) {
+  return _backdrop_federation_handle_reaction($activity, 'Announce');
+}
+
+/**
+ * Shared handler for Like and Announce reactions.
+ *
+ * @param array $activity
+ *   The incoming activity.
+ * @param string $type
+ *   'Like' or 'Announce'.
+ *
+ * @return array
+ *   Response array.
+ */
+function _backdrop_federation_handle_reaction($activity, $type) {
+  // Extract object URL — may be a string or array with 'id'.
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+  if (is_array($object)) {
+    $object_url = isset($object['id']) ? $object['id'] : NULL;
+  }
+  else {
+    $object_url = $object;
+  }
+
+  if (empty($object_url)) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  // Validate host matches local site.
+  global $base_url;
+  $local_host = parse_url($base_url, PHP_URL_HOST);
+  $object_host = parse_url($object_url, PHP_URL_HOST);
+  if ($object_host !== $local_host) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  // Extract nid from URL path.
+  $object_path = parse_url($object_url, PHP_URL_PATH);
+  if (!preg_match('/\/node\/(\d+)/', $object_path, $matches)) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+  $nid = (int) $matches[1];
+
+  // Load and validate the node.
+  $node = node_load($nid);
+  if (!$node || !$node->status || !_backdrop_federation_type_enabled($node->type)) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+
+  // Duplicate check.
+  $existing = db_select('backdrop_federation_reactions', 'r')
+    ->fields('r', array('id'))
+    ->condition('nid', $nid)
+    ->condition('actor_uri', $actor_uri)
+    ->condition('type', $type)
+    ->execute()
+    ->fetchField();
+
+  if ($existing !== FALSE) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  // Insert reaction.
+  db_insert('backdrop_federation_reactions')
+    ->fields(array(
+      'nid' => $nid,
+      'actor_uri' => $actor_uri,
+      'type' => $type,
+      'created' => REQUEST_TIME,
+    ))
+    ->execute();
+
+  watchdog('backdrop_federation', '@type from @actor on node @nid', array(
+    '@type' => $type,
+    '@actor' => $actor_uri,
+    '@nid' => $nid,
+  ), WATCHDOG_DEBUG);
+
+  backdrop_add_http_header('Status', '202 Accepted');
+  return array('status' => 'ok');
+}
+
+/**
+ * Handle an Undo of a Like or Announce reaction.
+ *
+ * @param array $activity
+ *   The Undo activity.
+ * @param string $type
+ *   'Like' or 'Announce'.
+ *
+ * @return array
+ *   Response array.
+ */
+function _backdrop_federation_handle_undo_reaction($activity, $type) {
+  // The liked/boosted object is nested: activity['object']['object'].
+  $inner = isset($activity['object']['object']) ? $activity['object']['object'] : NULL;
+  if (is_array($inner)) {
+    $object_url = isset($inner['id']) ? $inner['id'] : NULL;
+  }
+  else {
+    $object_url = $inner;
+  }
+
+  if (empty($object_url)) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  // Validate host.
+  global $base_url;
+  $local_host = parse_url($base_url, PHP_URL_HOST);
+  $object_host = parse_url($object_url, PHP_URL_HOST);
+  if ($object_host !== $local_host) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+
+  // Extract nid.
+  $object_path = parse_url($object_url, PHP_URL_PATH);
+  if (!preg_match('/\/node\/(\d+)/', $object_path, $matches)) {
+    backdrop_add_http_header('Status', '202 Accepted');
+    return array('status' => 'ok');
+  }
+  $nid = (int) $matches[1];
+
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+
+  db_delete('backdrop_federation_reactions')
+    ->condition('nid', $nid)
+    ->condition('actor_uri', $actor_uri)
+    ->condition('type', $type)
+    ->execute();
+
+  watchdog('backdrop_federation', 'Undo @type from @actor on node @nid', array(
+    '@type' => $type,
+    '@actor' => $actor_uri,
+    '@nid' => $nid,
+  ), WATCHDOG_DEBUG);
+
+  backdrop_add_http_header('Status', '202 Accepted');
   return array('status' => 'ok');
 }
 
@@ -282,7 +565,7 @@ function fediverse_inbox_endpoint() {
  * @return array
  *   Response array.
  */
-function _fediverse_handle_follow($activity) {
+function _backdrop_federation_handle_follow($activity) {
   $actor_uri = $activity['actor'];
 
   // Validate the actor.
@@ -292,7 +575,7 @@ function _fediverse_handle_follow($activity) {
   }
 
   // Fetch the actor to get their inbox.
-  $actor_data = _fediverse_fetch_actor($actor_uri);
+  $actor_data = _backdrop_federation_fetch_actor($actor_uri);
   if (!$actor_data) {
     backdrop_add_http_header('Status', '400 Bad Request');
     return array('error' => 'Could not fetch actor');
@@ -307,7 +590,7 @@ function _fediverse_handle_follow($activity) {
   }
 
   // Check if already following.
-  $existing = db_select('fediverse_followers', 'f')
+  $existing = db_select('backdrop_federation_followers', 'f')
     ->fields('f', array('id'))
     ->condition('actor_uri', $actor_uri)
     ->execute()
@@ -315,7 +598,7 @@ function _fediverse_handle_follow($activity) {
 
   if (!$existing) {
     // Add to followers.
-    db_insert('fediverse_followers')
+    db_insert('backdrop_federation_followers')
       ->fields(array(
         'actor_uri' => $actor_uri,
         'inbox_uri' => $inbox_uri,
@@ -324,11 +607,11 @@ function _fediverse_handle_follow($activity) {
       ))
       ->execute();
 
-    watchdog('fediverse', 'New follower: @actor', array('@actor' => $actor_uri), WATCHDOG_INFO);
+    watchdog('backdrop_federation', 'New follower: @actor', array('@actor' => $actor_uri), WATCHDOG_INFO);
   }
 
   // Send Accept activity.
-  _fediverse_send_accept($activity, $inbox_uri);
+  _backdrop_federation_send_accept($activity, $inbox_uri);
 
   backdrop_add_http_header('Status', '202 Accepted');
   return array('status' => 'ok');
@@ -343,16 +626,16 @@ function _fediverse_handle_follow($activity) {
  * @return array
  *   Response array.
  */
-function _fediverse_handle_undo_follow($activity) {
+function _backdrop_federation_handle_undo_follow($activity) {
   $actor_uri = $activity['actor'];
 
   // Remove from followers.
-  $deleted = db_delete('fediverse_followers')
+  $deleted = db_delete('backdrop_federation_followers')
     ->condition('actor_uri', $actor_uri)
     ->execute();
 
   if ($deleted) {
-    watchdog('fediverse', 'Unfollowed by: @actor', array('@actor' => $actor_uri), WATCHDOG_INFO);
+    watchdog('backdrop_federation', 'Unfollowed by: @actor', array('@actor' => $actor_uri), WATCHDOG_INFO);
   }
 
   return array('status' => 'ok');
@@ -366,21 +649,21 @@ function _fediverse_handle_undo_follow($activity) {
  * @param string $inbox_uri
  *   The inbox to send the Accept to.
  */
-function _fediverse_send_accept($follow_activity, $inbox_uri) {
+function _backdrop_federation_send_accept($follow_activity, $inbox_uri) {
   global $base_url;
 
   $accept = array(
     '@context' => 'https://www.w3.org/ns/activitystreams',
     'id' => $base_url . '/fediverse/activity/' . backdrop_hash_base64(uniqid('accept', TRUE)),
     'type' => 'Accept',
-    'actor' => fediverse_get_actor_uri(),
+    'actor' => backdrop_federation_get_actor_uri(),
     'object' => $follow_activity,
   );
 
   $json = json_encode($accept, JSON_UNESCAPED_SLASHES);
 
-  module_load_include('inc', 'fediverse', 'includes/fediverse.http_signature');
-  fediverse_post_to_inbox($inbox_uri, $json);
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+  backdrop_federation_post_to_inbox($inbox_uri, $json);
 }
 
 /**
@@ -392,7 +675,7 @@ function _fediverse_send_accept($follow_activity, $inbox_uri) {
  * @return array|false
  *   The actor data or FALSE on failure.
  */
-function _fediverse_fetch_actor($actor_uri) {
+function _backdrop_federation_fetch_actor($actor_uri) {
   $options = array(
     'headers' => array(
       'Accept' => 'application/activity+json, application/ld+json',
@@ -402,7 +685,7 @@ function _fediverse_fetch_actor($actor_uri) {
   $response = backdrop_http_request($actor_uri, $options);
 
   if ($response->code != 200) {
-    watchdog('fediverse', 'Failed to fetch actor @uri: @code', array(
+    watchdog('backdrop_federation', 'Failed to fetch actor @uri: @code', array(
       '@uri' => $actor_uri,
       '@code' => $response->code,
     ), WATCHDOG_WARNING);
@@ -411,7 +694,7 @@ function _fediverse_fetch_actor($actor_uri) {
 
   $data = json_decode($response->data, TRUE);
   if (!$data || !isset($data['inbox'])) {
-    watchdog('fediverse', 'Invalid actor data from @uri', array('@uri' => $actor_uri), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Invalid actor data from @uri', array('@uri' => $actor_uri), WATCHDOG_WARNING);
     return FALSE;
   }
 
@@ -427,9 +710,9 @@ function _fediverse_fetch_actor($actor_uri) {
  *   The actor's profile URL.
  *
  * @return string
- *   HTML paragraph with a fediverse-source class.
+ *   HTML paragraph with a backdrop-federation-source class.
  */
-function _fediverse_build_source_note($actor_name, $actor_url) {
+function _backdrop_federation_build_source_note($actor_name, $actor_url) {
   $instance = $actor_url ? parse_url($actor_url, PHP_URL_HOST) : '';
   $handle = '@' . $actor_name . ($instance ? '@' . $instance : '');
   if ($actor_url) {
@@ -438,7 +721,7 @@ function _fediverse_build_source_note($actor_name, $actor_url) {
   else {
     $link = check_plain($handle);
   }
-  return '<p class="fediverse-source">' . t('Replied via the fediverse — !link', array('!link' => $link)) . '</p>';
+  return '<p class="backdrop-federation-source">' . t('Replied via the fediverse — !link', array('!link' => $link)) . '</p>';
 }
 
 /**
@@ -450,9 +733,9 @@ function _fediverse_build_source_note($actor_name, $actor_url) {
  * @return array
  *   Response array.
  */
-function _fediverse_handle_create($activity) {
+function _backdrop_federation_handle_create($activity) {
   // Check the master switch.
-  if (!config_get('fediverse.settings', 'accept_replies')) {
+  if (!config_get('backdrop_federation.settings', 'accept_replies')) {
     return array('status' => 'ok');
   }
 
@@ -473,21 +756,21 @@ function _fediverse_handle_create($activity) {
   $local_host = parse_url($base_url, PHP_URL_HOST);
   $reply_host = parse_url($in_reply_to, PHP_URL_HOST);
   if ($reply_host !== $local_host) {
-    watchdog('fediverse', 'Ignoring reply to non-local URL: @url', array('@url' => $in_reply_to), WATCHDOG_DEBUG);
+    watchdog('backdrop_federation', 'Ignoring reply to non-local URL: @url', array('@url' => $in_reply_to), WATCHDOG_DEBUG);
     return array('status' => 'ok');
   }
 
   // Extract nid from the URL path.
   $reply_path = parse_url($in_reply_to, PHP_URL_PATH);
   if (!preg_match('/\/node\/(\d+)/', $reply_path, $matches)) {
-    watchdog('fediverse', 'Could not extract nid from inReplyTo URL: @url', array('@url' => $in_reply_to), WATCHDOG_DEBUG);
+    watchdog('backdrop_federation', 'Could not extract nid from inReplyTo URL: @url', array('@url' => $in_reply_to), WATCHDOG_DEBUG);
     return array('status' => 'ok');
   }
   $nid = (int) $matches[1];
 
   // Load and validate the node.
   $node = node_load($nid);
-  if (!$node || !$node->status || !_fediverse_type_enabled($node->type)) {
+  if (!$node || !$node->status || !_backdrop_federation_type_enabled($node->type)) {
     return array('status' => 'ok');
   }
 
@@ -497,7 +780,7 @@ function _fediverse_handle_create($activity) {
     return array('status' => 'ok');
   }
 
-  $existing_cid = db_select('fediverse_received', 'r')
+  $existing_cid = db_select('backdrop_federation_received', 'r')
     ->fields('r', array('cid'))
     ->condition('object_id', substr($object_id, 0, 2048))
     ->execute()
@@ -510,7 +793,7 @@ function _fediverse_handle_create($activity) {
 
   // Fetch actor for display name / profile URL.
   $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
-  $actor_data = $actor_uri ? _fediverse_fetch_actor($actor_uri) : FALSE;
+  $actor_data = $actor_uri ? _backdrop_federation_fetch_actor($actor_uri) : FALSE;
   $actor_name = '';
   $actor_url  = '';
   if ($actor_data) {
@@ -531,10 +814,10 @@ function _fediverse_handle_create($activity) {
   if (empty($subject)) {
     $subject = t('Fediverse reply');
   }
-  $content .= "\n" . _fediverse_build_source_note($actor_name, $actor_url);
+  $content .= "\n" . _backdrop_federation_build_source_note($actor_name, $actor_url);
 
   // Build the comment entity.
-  $moderation = config_get('fediverse.settings', 'comment_moderation');
+  $moderation = config_get('backdrop_federation.settings', 'comment_moderation');
 
   $comment = entity_create('comment', array(
     'nid'      => $nid,
@@ -554,7 +837,7 @@ function _fediverse_handle_create($activity) {
   comment_save($comment);
 
   // Record the mapping so updates/deletes can find this comment.
-  db_insert('fediverse_received')
+  db_insert('backdrop_federation_received')
     ->fields(array(
       'object_id' => substr($object_id, 0, 2048),
       'cid'       => $comment->cid,
@@ -563,7 +846,7 @@ function _fediverse_handle_create($activity) {
     ))
     ->execute();
 
-  watchdog('fediverse', 'Saved fediverse reply as comment @cid on node @nid.', array(
+  watchdog('backdrop_federation', 'Saved fediverse reply as comment @cid on node @nid.', array(
     '@cid' => $comment->cid,
     '@nid' => $nid,
   ), WATCHDOG_INFO);
@@ -581,7 +864,7 @@ function _fediverse_handle_create($activity) {
  * @return array
  *   Response array.
  */
-function _fediverse_handle_update($activity) {
+function _backdrop_federation_handle_update($activity) {
   $object = isset($activity['object']) ? $activity['object'] : NULL;
   if (!is_array($object) || empty($object['id'])) {
     return array('status' => 'ok');
@@ -590,7 +873,7 @@ function _fediverse_handle_update($activity) {
   $object_id = $object['id'];
 
   // Find the comment we stored for this object.
-  $cid = db_select('fediverse_received', 'r')
+  $cid = db_select('backdrop_federation_received', 'r')
     ->fields('r', array('cid'))
     ->condition('object_id', substr($object_id, 0, 2048))
     ->execute()
@@ -613,7 +896,7 @@ function _fediverse_handle_update($activity) {
   if (empty($subject)) {
     $subject = t('Fediverse reply');
   }
-  $content .= "\n" . _fediverse_build_source_note($comment->name, $comment->homepage);
+  $content .= "\n" . _backdrop_federation_build_source_note($comment->name, $comment->homepage);
 
   $comment->subject = $subject;
   $comment->comment_body[LANGUAGE_NONE][0] = array(
@@ -623,7 +906,7 @@ function _fediverse_handle_update($activity) {
 
   comment_save($comment);
 
-  watchdog('fediverse', 'Updated fediverse comment @cid from Update activity.', array('@cid' => $cid), WATCHDOG_INFO);
+  watchdog('backdrop_federation', 'Updated fediverse comment @cid from Update activity.', array('@cid' => $cid), WATCHDOG_INFO);
 
   backdrop_add_http_header('Status', '202 Accepted');
   return array('status' => 'ok');
@@ -638,7 +921,7 @@ function _fediverse_handle_update($activity) {
  * @return array
  *   Response array.
  */
-function _fediverse_handle_delete($activity) {
+function _backdrop_federation_handle_delete($activity) {
   $object = isset($activity['object']) ? $activity['object'] : NULL;
 
   // The object may be a plain string URI or an array with an 'id' key.
@@ -653,7 +936,7 @@ function _fediverse_handle_delete($activity) {
   }
 
   // Find the comment.
-  $row = db_select('fediverse_received', 'r')
+  $row = db_select('backdrop_federation_received', 'r')
     ->fields('r', array('cid'))
     ->condition('object_id', substr($object_id, 0, 2048))
     ->execute()
@@ -666,11 +949,11 @@ function _fediverse_handle_delete($activity) {
   $cid = $row->cid;
   comment_delete($cid);
 
-  db_delete('fediverse_received')
+  db_delete('backdrop_federation_received')
     ->condition('object_id', substr($object_id, 0, 2048))
     ->execute();
 
-  watchdog('fediverse', 'Deleted fediverse comment @cid from Delete activity.', array('@cid' => $cid), WATCHDOG_INFO);
+  watchdog('backdrop_federation', 'Deleted fediverse comment @cid from Delete activity.', array('@cid' => $cid), WATCHDOG_INFO);
 
   backdrop_add_http_header('Status', '202 Accepted');
   return array('status' => 'ok');
@@ -679,9 +962,9 @@ function _fediverse_handle_delete($activity) {
 /**
  * Subscribe form - allows fediverse users to follow this site.
  */
-function fediverse_subscribe_form($form, &$form_state) {
+function backdrop_federation_subscribe_form($form, &$form_state) {
   global $base_url;
-  $actor_name = fediverse_get_actor_name();
+  $actor_name = backdrop_federation_get_actor_name();
   $host = parse_url($base_url, PHP_URL_HOST);
   $handle = '@' . $actor_name . '@' . $host;
 
@@ -701,7 +984,7 @@ function fediverse_subscribe_form($form, &$form_state) {
     $default_address = $uri;
   }
 
-  $form['fediverse_address'] = array(
+  $form['backdrop_federation_address'] = array(
     '#type' => 'textfield',
     '#title' => t('Your Fediverse address'),
     '#description' => t('For example: @user@mastodon.social'),
@@ -722,12 +1005,12 @@ function fediverse_subscribe_form($form, &$form_state) {
 /**
  * Validation for the subscribe form.
  */
-function fediverse_subscribe_form_validate($form, &$form_state) {
-  $address = trim($form_state['values']['fediverse_address']);
+function backdrop_federation_subscribe_form_validate($form, &$form_state) {
+  $address = trim($form_state['values']['backdrop_federation_address']);
   $address = ltrim($address, '@');
 
   if (!preg_match('/^[^@\s]+@[^@\s]+\.[^@\s]+$/', $address)) {
-    form_set_error('fediverse_address', t('Please enter a valid Fediverse address (e.g., user@mastodon.social).'));
+    form_set_error('backdrop_federation_address', t('Please enter a valid Fediverse address (e.g., user@mastodon.social).'));
   }
 }
 
@@ -736,12 +1019,12 @@ function fediverse_subscribe_form_validate($form, &$form_state) {
  *
  * Redirects to the user's fediverse instance to complete the follow.
  */
-function fediverse_subscribe_form_submit($form, &$form_state) {
-  $address = ltrim(trim($form_state['values']['fediverse_address']), '@');
+function backdrop_federation_subscribe_form_submit($form, &$form_state) {
+  $address = ltrim(trim($form_state['values']['backdrop_federation_address']), '@');
   $parts = explode('@', $address, 2);
   $domain = $parts[1];
 
-  $actor_uri = fediverse_get_actor_uri();
+  $actor_uri = backdrop_federation_get_actor_uri();
   $redirect_url = 'https://' . $domain . '/authorize_follow?uri=' . urlencode($actor_uri);
 
   backdrop_goto($redirect_url);
@@ -752,15 +1035,15 @@ function fediverse_subscribe_form_submit($form, &$form_state) {
  *
  * Returns an OrderedCollection of activities.
  */
-function fediverse_outbox_endpoint() {
-  if (!config_get('fediverse.settings', 'enabled')) {
+function backdrop_federation_outbox_endpoint() {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
     return MENU_NOT_FOUND;
   }
 
   global $base_url;
 
   // Get total count.
-  $total = db_select('fediverse_outbox', 'o')
+  $total = db_select('backdrop_federation_outbox', 'o')
     ->countQuery()
     ->execute()
     ->fetchField();
@@ -770,7 +1053,7 @@ function fediverse_outbox_endpoint() {
 
   if ($page > 0 || isset($_GET['page'])) {
     // Return a page of items.
-    $activities = db_select('fediverse_outbox', 'o')
+    $activities = db_select('backdrop_federation_outbox', 'o')
       ->fields('o', array('activity_json'))
       ->orderBy('created', 'DESC')
       ->range($page * $per_page, $per_page)
@@ -809,25 +1092,41 @@ function fediverse_outbox_endpoint() {
  *
  * Returns an OrderedCollection of followers.
  */
-function fediverse_followers_endpoint() {
-  if (!config_get('fediverse.settings', 'enabled')) {
+function backdrop_federation_followers_endpoint() {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
     return MENU_NOT_FOUND;
   }
 
   global $base_url;
 
   // Get total count.
-  $total = db_select('fediverse_followers', 'f')
+  $total = db_select('backdrop_federation_followers', 'f')
     ->countQuery()
     ->execute()
     ->fetchField();
 
-  // For privacy, we only return the count, not the actual followers.
+  // Serve a paginated view if requested.
+  if (isset($_GET['page'])) {
+    $result = array(
+      '@context' => 'https://www.w3.org/ns/activitystreams',
+      'id' => $base_url . '/fediverse/followers?page=1',
+      'type' => 'OrderedCollectionPage',
+      'partOf' => $base_url . '/fediverse/followers',
+      'totalItems' => (int) $total,
+      'orderedItems' => array(),
+    );
+    backdrop_add_http_header('Access-Control-Allow-Origin', '*');
+    return $result;
+  }
+
+  // Return the collection summary with a first-page link so remote servers
+  // trust totalItems. Follower URIs are not exposed to preserve privacy.
   $result = array(
     '@context' => 'https://www.w3.org/ns/activitystreams',
     'id' => $base_url . '/fediverse/followers',
     'type' => 'OrderedCollection',
     'totalItems' => (int) $total,
+    'first' => $base_url . '/fediverse/followers?page=1',
   );
 
   backdrop_add_http_header('Access-Control-Allow-Origin', '*');
