@@ -633,6 +633,92 @@ function backdrop_federation_admin_blocklist_delete_confirm_submit($form, &$form
 }
 
 /**
+ * Admin page listing outgoing activities (outbox debug view).
+ */
+function backdrop_federation_admin_outbox_page() {
+  $total = db_select('backdrop_federation_outbox', 'o')
+    ->countQuery()
+    ->execute()
+    ->fetchField();
+
+  $output = '<p>' . t('The outbox records every ActivityPub activity sent from this site (Create, Update, Delete). Use the <em>View JSON</em> link to inspect the exact payload that was delivered to followers — useful for verifying activity IDs, object content, and signatures.') . '</p>';
+  $output .= '<p>' . format_plural($total, '1 activity in outbox', '@count activities in outbox') . '</p>';
+
+  if ($total == 0) {
+    $output .= '<p>' . t('No outgoing activities yet.') . '</p>';
+    return $output;
+  }
+
+  $rows = db_select('backdrop_federation_outbox', 'o')
+    ->fields('o', array('id', 'activity_type', 'object_type', 'nid', 'activity_id', 'created'))
+    ->orderBy('id', 'DESC')
+    ->range(0, 50)
+    ->execute();
+
+  $header = array(t('ID'), t('Type'), t('Object'), t('Node'), t('Activity URI'), t('Created'), t('JSON'));
+  $table_rows = array();
+
+  foreach ($rows as $row) {
+    $node_link = $row->nid ? l('node/' . $row->nid, 'node/' . $row->nid) : '—';
+    $json_url = 'admin/config/services/fediverse/outbox/' . $row->id . '/json';
+    $table_rows[] = array(
+      $row->id,
+      check_plain($row->activity_type),
+      check_plain($row->object_type),
+      $node_link,
+      '<span style="font-size:0.85em;word-break:break-all;">' . check_plain($row->activity_id) . '</span>',
+      format_date($row->created, 'short'),
+      l(t('View JSON'), $json_url),
+    );
+  }
+
+  $output .= theme('table', array('header' => $header, 'rows' => $table_rows));
+
+  if ($total > 50) {
+    $output .= '<p>' . t('Showing most recent 50 of @total activities.', array('@total' => $total)) . '</p>';
+  }
+
+  return $output;
+}
+
+/**
+ * Renders raw JSON for a single outbox activity.
+ *
+ * @param int $id
+ *   The outbox row ID.
+ */
+function backdrop_federation_admin_outbox_json($id) {
+  $row = db_select('backdrop_federation_outbox', 'o')
+    ->fields('o', array('id', 'activity_type', 'nid', 'activity_json', 'created'))
+    ->condition('id', (int) $id)
+    ->execute()
+    ->fetchObject();
+
+  if (!$row) {
+    return MENU_NOT_FOUND;
+  }
+
+  // Pretty-print the stored JSON.
+  $decoded = json_decode($row->activity_json);
+  $pretty = json_encode($decoded, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE);
+
+  $back_link = l(t('← Back to Outbox'), 'admin/config/services/fediverse/outbox');
+  $meta = t('Activity #@id &middot; @type &middot; @date', array(
+    '@id' => $row->id,
+    '@type' => $row->activity_type,
+    '@date' => format_date($row->created, 'medium'),
+  ));
+
+  $output  = '<p>' . $back_link . '</p>';
+  $output .= '<p>' . $meta . '</p>';
+  $output .= '<pre style="background:#f5f5f5;padding:1em;overflow:auto;font-size:0.85em;">';
+  $output .= check_plain($pretty);
+  $output .= '</pre>';
+
+  return $output;
+}
+
+/**
  * Admin page listing all fediverse followers.
  */
 function backdrop_federation_admin_followers_page() {

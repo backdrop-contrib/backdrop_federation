@@ -40,7 +40,7 @@ function backdrop_federation_build_activity(Node $node, $type) {
     'id' => $activity_id,
     'type' => $type,
     'actor' => $actor_uri,
-    'published' => gmdate('c', $node->created),
+    'published' => gmdate('c', REQUEST_TIME),
     'to' => array('https://www.w3.org/ns/activitystreams#Public'),
     'cc' => array($base_url . '/fediverse/followers'),
     'object' => $object,
