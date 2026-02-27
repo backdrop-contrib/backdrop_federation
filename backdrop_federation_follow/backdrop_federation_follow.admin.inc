@@ -82,6 +82,36 @@ function backdrop_federation_follow_admin_form($form, &$form_state) {
     '#limit_validation_errors' => array(array('handle')),
   );
 
+  // Feed retention settings.
+  $form['settings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Feed settings'),
+  );
+
+  $form['settings']['feed_retention'] = array(
+    '#type' => 'select',
+    '#title' => t('Delete feed posts after'),
+    '#description' => t('Incoming posts from followed accounts will be automatically removed after this period. Deletion runs during cron.'),
+    '#options' => array(
+      '0'         => t('Never (keep forever)'),
+      '300'       => t('5 minutes (testing only)'),
+      '3600'      => t('1 hour (testing only)'),
+      '604800'    => t('1 week'),
+      '2592000'   => t('1 month'),
+      '15552000'  => t('6 months'),
+      '31536000'  => t('1 year'),
+      '157680000' => t('5 years'),
+    ),
+    '#default_value' => config_get('backdrop_federation_follow.settings', 'feed_retention'),
+  );
+
+  $form['settings']['save'] = array(
+    '#type' => 'submit',
+    '#value' => t('Save settings'),
+    '#submit' => array('backdrop_federation_follow_settings_submit'),
+    '#limit_validation_errors' => array(array('feed_retention')),
+  );
+
   return $form;
 }
 
@@ -133,9 +163,9 @@ function backdrop_federation_follow_admin_form_submit($form, &$form_state) {
     ->fields(array(
       'actor_uri'        => $resolved['actor_uri'],
       'inbox_uri'        => $resolved['inbox_uri'],
-      'username'         => $resolved['username'],
+      'username'         => _backdrop_federation_follow_strip_emoji($resolved['username']),
       'domain'           => $resolved['domain'],
-      'display_name'     => $resolved['display_name'],
+      'display_name'     => _backdrop_federation_follow_strip_emoji($resolved['display_name']),
       'avatar_url'       => $resolved['avatar_url'],
       'status'           => 'pending',
       'follow_activity_id' => $activity_id,
@@ -145,6 +175,16 @@ function backdrop_federation_follow_admin_form_submit($form, &$form_state) {
 
   backdrop_set_message(t('Follow request sent to @handle. The status will update to "Accepted" once their server responds.', array('@handle' => '@' . $handle)));
   watchdog('backdrop_federation_follow', 'Sent Follow request to @actor', array('@actor' => $resolved['actor_uri']), WATCHDOG_INFO);
+}
+
+/**
+ * Submit handler for feed retention settings.
+ */
+function backdrop_federation_follow_settings_submit($form, &$form_state) {
+  config('backdrop_federation_follow.settings')
+    ->set('feed_retention', $form_state['values']['feed_retention'])
+    ->save();
+  backdrop_set_message(t('Feed settings saved.'));
 }
 
 /**
@@ -255,11 +295,67 @@ function backdrop_federation_follow_admin_feed_page() {
     $output .= '<div style="border-bottom:1px solid #ddd;padding:1em 0;">';
     $output .= '<p style="margin:0 0 0.5em;">' . $meta . '</p>';
     $output .= '<div>' . $row->content . '</div>';
+    $output .= _backdrop_federation_follow_render_attachments($object);
     $output .= '</div>';
   }
 
   if ($total > 50) {
     $output .= '<p>' . t('Showing most recent 50 of @total posts.', array('@total' => $total)) . '</p>';
+  }
+
+  return $output;
+}
+
+/**
+ * Render media attachments from an ActivityPub object.
+ *
+ * Images are displayed inline. Other document types (audio, video, etc.)
+ * are rendered as labelled links to the original file.
+ *
+ * @param array $object
+ *   The decoded ActivityPub object array.
+ *
+ * @return string
+ *   HTML string of rendered attachments, or empty string if none.
+ */
+function _backdrop_federation_follow_render_attachments($object) {
+  if (empty($object['attachment']) || !is_array($object['attachment'])) {
+    return '';
+  }
+
+  $output = '';
+
+  foreach ($object['attachment'] as $attachment) {
+    $url = isset($attachment['url']) ? $attachment['url'] : NULL;
+    if (!$url || !filter_var($url, FILTER_VALIDATE_URL)) {
+      continue;
+    }
+
+    $media_type = isset($attachment['mediaType']) ? $attachment['mediaType'] : '';
+    $alt = isset($attachment['name']) ? check_plain($attachment['name']) : '';
+    $safe_url = check_url($url);
+
+    if (strpos($media_type, 'image/') === 0 || $attachment['type'] === 'Image') {
+      $output .= '<img src="' . $safe_url . '" alt="' . $alt . '"'
+        . ' style="max-width:200px;max-height:200px;width:auto;height:auto;display:block;margin-top:0.5em;">';
+    }
+    elseif (strpos($media_type, 'video/') === 0) {
+      $output .= '<video controls style="max-width:100%;display:block;margin-top:0.5em;">'
+        . '<source src="' . $safe_url . '" type="' . check_plain($media_type) . '">'
+        . '<a href="' . $safe_url . '">' . ($alt ?: t('Download video')) . '</a>'
+        . '</video>';
+    }
+    elseif (strpos($media_type, 'audio/') === 0) {
+      $output .= '<audio controls style="width:100%;margin-top:0.5em;">'
+        . '<source src="' . $safe_url . '" type="' . check_plain($media_type) . '">'
+        . '<a href="' . $safe_url . '">' . ($alt ?: t('Download audio')) . '</a>'
+        . '</audio>';
+    }
+    else {
+      // Unknown type — render as a download link.
+      $label = $alt ?: check_plain(basename(parse_url($url, PHP_URL_PATH)));
+      $output .= '<p><a href="' . $safe_url . '">' . $label . '</a></p>';
+    }
   }
 
   return $output;

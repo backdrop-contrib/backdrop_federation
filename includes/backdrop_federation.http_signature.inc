@@ -270,10 +270,11 @@ function backdrop_federation_post_to_inbox($inbox_uri, $json) {
     return TRUE;
   }
 
-  watchdog('backdrop_federation', 'Failed to post to @inbox: @code @error', array(
+  watchdog('backdrop_federation', 'Failed to post to @inbox: @code @error — Response: @body', array(
     '@inbox' => $inbox_uri,
     '@code' => $response->code,
     '@error' => isset($response->error) ? $response->error : '',
+    '@body' => isset($response->data) ? substr($response->data, 0, 500) : '',
   ), WATCHDOG_WARNING);
 
   return FALSE;

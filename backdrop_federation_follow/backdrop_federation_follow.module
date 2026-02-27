@@ -8,6 +8,41 @@
  */
 
 /**
+ * Implements hook_config_info().
+ */
+function backdrop_federation_follow_config_info() {
+  return array(
+    'backdrop_federation_follow.settings' => array(
+      'label' => t('Fediverse Follow settings'),
+      'group' => t('Configuration'),
+    ),
+  );
+}
+
+/**
+ * Implements hook_cron().
+ *
+ * Deletes feed posts older than the configured retention period.
+ */
+function backdrop_federation_follow_cron() {
+  $retention = config_get('backdrop_federation_follow.settings', 'feed_retention');
+
+  // 0 means keep forever.
+  if (empty($retention) || $retention === '0') {
+    return;
+  }
+
+  $cutoff = REQUEST_TIME - (int) $retention;
+  $deleted = db_delete('backdrop_federation_feed')
+    ->condition('received', $cutoff, '<')
+    ->execute();
+
+  if ($deleted) {
+    watchdog('backdrop_federation_follow', 'Cron removed @count expired feed posts.', array('@count' => $deleted), WATCHDOG_INFO);
+  }
+}
+
+/**
  * Implements hook_menu().
  */
 function backdrop_federation_follow_menu() {
@@ -139,7 +174,7 @@ function _backdrop_federation_follow_handle_create($activity) {
     return;
   }
 
-  $content = isset($object['content']) ? filter_xss($object['content']) : '';
+  $content = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'])) : '';
   $published = !empty($object['published']) ? strtotime($object['published']) : REQUEST_TIME;
   $object_type = isset($object['type']) ? $object['type'] : 'Note';
 
@@ -186,7 +221,7 @@ function _backdrop_federation_follow_handle_update($activity) {
     return;
   }
 
-  $content = isset($object['content']) ? filter_xss($object['content']) : '';
+  $content = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'])) : '';
 
   db_update('backdrop_federation_feed')
     ->fields(array(
@@ -355,4 +390,21 @@ function _backdrop_federation_follow_resolve_handle($handle) {
     'display_name' => isset($actor['name']) ? $actor['name'] : $username,
     'avatar_url' => isset($actor['icon']['url']) ? $actor['icon']['url'] : NULL,
   );
+}
+
+/**
+ * Strip 4-byte UTF-8 characters (emoji etc.) that MySQL utf8 cannot store.
+ *
+ * MySQL's default utf8 charset only supports up to 3-byte characters.
+ * Emoji and other supplementary-plane characters use 4 bytes and must be
+ * removed before inserting into varchar/text columns.
+ *
+ * @param string $text
+ *   The input string.
+ *
+ * @return string
+ *   The string with 4-byte characters removed.
+ */
+function _backdrop_federation_follow_strip_emoji($text) {
+  return preg_replace('/[\x{10000}-\x{10FFFF}]/u', '', trim($text));
 }
