@@ -1,30 +1,42 @@
 # Backdrop Federation
 
-Enables ActivityPub federation for Backdrop CMS. Fediverse users can follow the site and receive posts in their feeds. Replies, likes, and boosts from the fediverse are reflected back on the site.
+Enables ActivityPub federation for Backdrop CMS, connecting your site to the Fediverse. Fediverse users can follow the site and receive posts in their feeds. Replies, likes, and boosts from the Fediverse are reflected back on the site.
 
-The module implements a **one-way outbound publisher** model: the site acts as an ActivityPub actor that broadcasts content. It does not follow remote accounts or aggregate remote content beyond what followers send back in response.
+The core module implements an **outbound publisher** model: the site acts as an ActivityPub actor that broadcasts content to followers. An optional sub-module, **Backdrop Federation Follow**, extends this to two-way federation by allowing the site to follow remote accounts and receive their posts in a local feed.
 
 ---
 
 ## Installation
 
-Install this module using the official Backdrop CMS instructions. Issues Bugs and feature requests should be reported in the Issue Queue.
+Install this module using the official Backdrop CMS instructions. Bugs and feature requests should be reported in the Issue Queue.
 
+---
 
+## Included Sub-modules
+
+| Sub-module | Purpose |
+|---|---|
+| **Backdrop Federation Follow** | Follow remote Fediverse accounts and display their posts in a local feed |
+
+Sub-modules are located inside the `backdrop_federation/` directory and can be enabled independently at `admin/modules`.
+
+---
 
 ## Features
 
 - **Site actor** — the site presents itself as an ActivityPub `Application` actor discoverable by `@username@domain` handle
 - **WebFinger** — resolves `acct:name@domain` handles so remote servers can discover the actor
-- **NodeInfo** — advertises software name, version, and usage statistics to the fediverse
+- **NodeInfo** — advertises software name, version, and usage statistics to the Fediverse
 - **Content federation** — selected content types are automatically broadcast when nodes are published, updated, or unpublished
+- **Immediate delivery** — posts are delivered to follower inboxes synchronously on node save, with cron as a fallback
 - **Per-type field mapping** — choose which text field is used as the post body for each content type
+- **Content negotiation** — node URLs respond with ActivityPub JSON when requested with an appropriate `Accept` header, allowing remote servers to fetch and verify notes by URL
 - **Follower management** — accepts `Follow` activities, stores followers, and sends signed `Accept` responses
-- **Async delivery queue** — posts are delivered to follower inboxes via Backdrop's cron queue, not inline on save
 - **Shared inbox support** — uses a follower's shared inbox when available to reduce delivery requests
 - **Re-deliver button** — re-queues all outbox entries to current followers from the admin UI
-- **Replies as comments** — incoming fediverse replies to local nodes are optionally saved as Backdrop comments
-- **Comment moderation** — fediverse replies can be held for approval before publishing
+- **Outbox debug view** — browse outgoing activities and inspect their raw JSON from the admin UI
+- **Replies as comments** — incoming Fediverse replies to local nodes are optionally saved as Backdrop comments
+- **Comment moderation** — Fediverse replies can be held for approval before publishing
 - **Likes and boosts** — incoming `Like` and `Announce` activities are counted and displayed on nodes
 - **HTTP Signatures** — all outgoing requests are signed; all incoming requests are verified (draft-cavage)
 - **Blocklist** — block specific actors by URI or entire domains; blocked followers are also removed
@@ -40,9 +52,10 @@ Install this module using the official Backdrop CMS instructions. Issues Bugs an
 All settings are at **Administration › Configuration › Web services › Backdrop Federation** (`admin/config/services/fediverse`).
 
 | Tab | Purpose |
-|-----|---------|
+|---|---|
 | Settings | Enable/disable federation, actor username, display name, bio, content types, reply handling |
-| Followers | List of current fediverse followers |
+| Followers | List of current Fediverse followers |
+| Outbox | Browse outgoing activities and inspect raw JSON (debug) |
 | Blocklist | Block actors or domains; accepts raw URIs or `@user@domain` handles |
 | Rate Limit | Max requests per actor per time window |
 
@@ -68,9 +81,15 @@ Actor settings (username, display name, bio) are configurable at `admin/config/s
 Selected content types are federated automatically when nodes are published, updated, or unpublished.
 
 - `hook_node_insert` and `hook_node_update` queue a `Create`, `Update`, or `Delete` activity
-- Activities are serialised as ActivityPub `Article` objects and stored in `backdrop_federation_outbox`
+- Activities are stored in `backdrop_federation_outbox` and delivered immediately on node save
 - Per-content-type field mapping lets you choose which text field is used as the post body
 - The outbox is publicly browsable at `/fediverse/outbox` as an `OrderedCollection`
+
+---
+
+### Content Negotiation for Node URLs
+
+Remote servers often fetch a note's `id` URL to verify it before processing an activity. When a request arrives at a node URL (e.g. `/node/5`) with an `Accept: application/activity+json` header, the module serves the ActivityPub JSON representation of the node directly instead of the normal HTML page. This is handled in `hook_init` and only applies to published nodes of federated content types.
 
 ---
 
@@ -86,13 +105,13 @@ Remote users follow the site by sending a `Follow` activity to `/fediverse/inbox
 
 ---
 
-### Delivery Queue
+### Delivery
 
-Posts are delivered asynchronously to avoid blocking the publish action.
+Posts are delivered immediately after node save by draining the delivery queue synchronously (up to a 30-second time limit). Cron processes any remaining items as a fallback.
 
 - For each new activity, one queue item is created per unique follower inbox (preferring shared inboxes where available)
 - Items are stored in Backdrop's built-in queue system (`backdrop_federation_activity_delivery`)
-- A cron queue worker (`hook_cron_queue_info`) processes deliveries, signing each HTTP POST with the site's private key
+- A cron queue worker also processes deliveries, signing each HTTP POST with the site's private key
 - The admin settings page includes a **Re-deliver** button that re-queues all outbox entries to current followers — useful when posts were published before any followers existed
 
 ---
@@ -112,7 +131,7 @@ When the `accept_replies` setting is enabled, incoming `Create` activities conta
 
 ### Inbox: Likes and Boosts
 
-Incoming `Like` and `Announce` (boost) activities from fediverse users are recorded and displayed as counts on nodes.
+Incoming `Like` and `Announce` (boost) activities from Fediverse users are recorded and displayed as counts on nodes.
 
 - Reactions are stored in `backdrop_federation_reactions` with a unique constraint on `(nid, actor_uri, type)` to prevent duplicates
 - `Undo Like` and `Undo Announce` activities remove the corresponding row
@@ -142,7 +161,7 @@ All outgoing requests are signed and all incoming requests are verified using HT
 Administrators can block specific actors or entire domains at `admin/config/services/fediverse/blocklist`.
 
 - Entries are stored in `backdrop_federation_blocklist` with a `type` of `actor` or `domain`
-- The check runs in `backdrop_federation_inbox_endpoint` after signature verification and before activity dispatch
+- The check runs in the inbox endpoint after signature verification and before activity dispatch
 - Actor blocks match on the full URI; domain blocks match on the hostname extracted from the actor URI via `parse_url`
 - Blocked requests receive a `403 Forbidden` response
 - Adding a block also removes any existing followers matching the blocked actor or domain
@@ -155,7 +174,7 @@ Administrators can block specific actors or entire domains at `admin/config/serv
 Inbox requests are rate-limited per actor URI to limit abuse.
 
 - Request counts and window start times are tracked in `backdrop_federation_rate_limit`
-- On each inbox request, the actor's count for the current window is checked and incremented atomically
+- On each inbox request, the actor's count for the current window is checked and incremented
 - If the count exceeds the configured limit, the request receives `429 Too Many Requests` with a `Retry-After: 60` header
 - Window size and request limit are configurable at `admin/config/services/fediverse/rate-limit`
 - Defaults: 20 requests per 60-second window
@@ -163,10 +182,50 @@ Inbox requests are rate-limited per actor URI to limit abuse.
 
 ---
 
+## Sub-module: Backdrop Federation Follow
+
+The **Backdrop Federation Follow** sub-module adds two-way federation: the site can follow remote Fediverse accounts and receive their posts into a local feed.
+
+### Features
+
+- Follow any Fediverse account by entering a `@user@domain` handle in the admin UI
+- Resolves handles via WebFinger and sends a signed `Follow` activity automatically
+- Tracks follow status (Pending, Accepted, Rejected) as remote servers respond
+- Stores incoming posts from followed accounts in a local feed
+- Feed posts are updated or removed when the remote account edits or deletes them
+- Unfollow sends a signed `Undo Follow` activity and removes the account's posts from the local feed
+
+### Configuration
+
+Two additional tabs appear at `admin/config/services/fediverse` when the sub-module is enabled:
+
+| Tab | Purpose |
+|---|---|
+| Following | Manage followed accounts; send new Follow requests |
+| Feed | Browse posts received from followed accounts |
+
+### How It Works
+
+1. Admin enters a handle at the **Following** tab
+2. The module resolves the handle via WebFinger to get the actor URI and inbox
+3. A signed `Follow` activity is POSTed to the remote inbox
+4. The remote server sends `Accept` or `Reject` back to `/fediverse/inbox`
+5. On `Accept`, the follow status is updated and the remote server begins delivering posts
+6. Incoming `Create` activities from followed accounts are stored in `backdrop_federation_feed`
+7. `Update` and `Delete` activities from followed accounts update or remove the stored posts
+
+### Developer Hook
+
+The parent module invokes `hook_backdrop_federation_inbox_activity($activity)` for every verified incoming activity. The Follow sub-module uses this to handle `Accept`, `Reject`, `Create`, `Update`, and `Delete` activities from followed accounts without modifying the parent module's inbox handler. Other modules can implement this hook to react to any incoming ActivityPub activity.
+
+---
+
 ## Database Tables
 
+### Core module
+
 | Table | Purpose |
-|-------|---------|
+|---|---|
 | `backdrop_federation_keypair` | RSA keypair for signing |
 | `backdrop_federation_followers` | Remote followers and their inbox URIs |
 | `backdrop_federation_outbox` | Outgoing activities |
@@ -175,28 +234,12 @@ Inbox requests are rate-limited per actor URI to limit abuse.
 | `backdrop_federation_blocklist` | Blocked actors and domains |
 | `backdrop_federation_rate_limit` | Per-actor request counts for rate limiting |
 
----
+### Backdrop Federation Follow sub-module
 
-## Not Yet Implemented
-
-The following are standard or commonly expected ActivityPub features not currently present in this module.
-
-**Missing endpoints / collections**
-- **`/fediverse/following`** — Even an empty collection should exist; many servers expect the endpoint to be present on the actor
-- **`/fediverse/liked`** — Collection of objects the actor has liked; less critical but part of the spec
-
-**Missing actor properties**
-- **`endpoints.sharedInbox`** — The actor document does not advertise its own shared inbox URI. The module already uses shared inboxes when delivering to followers, but does not expose one for incoming traffic
-- **`featured`** — A collection of pinned posts, used by Mastodon to show highlighted content on the profile
-
-**Missing content features**
-- **Hashtags** — Posts should include a `tag` array with `Hashtag` objects so they appear in remote tag feeds (e.g. `#backdrop` on Mastodon)
-- **Mentions** — `@user@instance` references in post content should be expressed as `tag` objects of type `Mention`
-- **Media attachments** — Images attached to nodes should be included as `attachment` objects on the Article so they render in remote clients
-- **Content warnings** — The `summary` field on Note/Article objects, used as a CW/subject line in Mastodon
-
-**Missing outgoing activity types**
-- **`Tombstone`** — Delete activities should wrap the deleted object in a proper `Tombstone` rather than just referencing the URI
+| Table | Purpose |
+|---|---|
+| `backdrop_federation_following` | Remote accounts this site follows, with status and inbox URIs |
+| `backdrop_federation_feed` | Posts received from followed accounts |
 
 ---
 
@@ -205,7 +248,7 @@ The following are standard or commonly expected ActivityPub features not current
 All endpoints are publicly accessible. The URL paths use `/fediverse/` regardless of module name for compatibility with remote servers that have stored these URLs.
 
 | Path | Purpose |
-|------|---------|
+|---|---|
 | `/.well-known/webfinger` | Actor discovery |
 | `/.well-known/nodeinfo` | NodeInfo discovery |
 | `/nodeinfo/2.1` | NodeInfo metadata |
@@ -215,15 +258,40 @@ All endpoints are publicly accessible. The URL paths use `/fediverse/` regardles
 | `/fediverse/followers` | Followers collection |
 | `/fediverse/subscribe` | Remote follow form |
 
+---
+
+## Not Yet Implemented
+
+The following are standard or commonly expected ActivityPub features not currently present in this module.
+
+**Missing endpoints / collections**
+- **`/fediverse/following`** — An empty collection endpoint should exist on the actor even when the Follow sub-module is not enabled; many servers expect it to be present
+- **`/fediverse/liked`** — Collection of objects the actor has liked; less critical but part of the spec
+
+**Missing actor properties**
+- **`endpoints.sharedInbox`** — The actor document does not advertise its own shared inbox URI. The module already uses shared inboxes when delivering to followers, but does not expose one for incoming traffic
+- **`featured`** — A collection of pinned posts, used by Mastodon to show highlighted content on the profile
+
+**Missing content features**
+- **Hashtags** — Posts should include a `tag` array with `Hashtag` objects so they appear in remote tag feeds (e.g. `#backdrop` on Mastodon)
+- **Mentions** — `@user@instance` references in post content should be expressed as `tag` objects of type `Mention`
+- **Content warnings** — The `summary` field on Note/Article objects is populated from the node teaser but is not exposed as a configurable content warning field
+
+**Missing Follow sub-module features**
+- **Public feed page** — the feed is currently admin-only; a configurable public-facing page would allow site visitors to see followed accounts' posts
+- **Feed block** — a block showing recent posts from followed accounts for placement in layouts
+
+---
+
 ## AI Statement
 
-AI tools were used in the creation of this module with human supervision and testing. 
-Please, use with caution and be sure to report any errors or suspicious code.
+AI tools were used in the creation of this module with human supervision and testing.
+Please use with caution and be sure to report any errors or suspicious code.
 
-Current Maintainer
-------------------
+## Current Maintainer
+
 Tim Erickson (@stpaultim)
 
-License
--------
+## License
+
 This project is GPL v2 software. See the LICENSE.txt file in this directory for complete text.
