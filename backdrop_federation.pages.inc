@@ -274,25 +274,25 @@ function backdrop_federation_inbox_endpoint() {
       break;
 
     case 'Create':
+      module_invoke_all('backdrop_federation_inbox_activity', $activity);
       return _backdrop_federation_handle_create($activity);
 
     case 'Update':
+      module_invoke_all('backdrop_federation_inbox_activity', $activity);
       return _backdrop_federation_handle_update($activity);
 
     case 'Delete':
+      module_invoke_all('backdrop_federation_inbox_activity', $activity);
       return _backdrop_federation_handle_delete($activity);
 
     case 'Accept':
     case 'Reject':
-      // Acknowledgements - just log and accept.
-      watchdog('backdrop_federation', 'Received @type activity from @actor', array(
-        '@type' => $activity['type'],
-        '@actor' => $activity['actor'],
-      ), WATCHDOG_DEBUG);
+      module_invoke_all('backdrop_federation_inbox_activity', $activity);
       return array('status' => 'ok');
   }
 
-  // Unknown activity type - accept but don't process.
+  // Unknown activity type — let sub-modules handle it if they want.
+  module_invoke_all('backdrop_federation_inbox_activity', $activity);
   watchdog('backdrop_federation', 'Received unhandled activity type: @type', array('@type' => $activity['type']), WATCHDOG_DEBUG);
   return array('status' => 'ok');
 }

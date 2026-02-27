@@ -1,0 +1,164 @@
+<?php
+/**
+ * @file
+ * Install, update and uninstall functions for Backdrop Federation Follow.
+ */
+
+/**
+ * Implements hook_schema().
+ */
+function backdrop_federation_follow_schema() {
+  $schema = array();
+
+  $schema['backdrop_federation_following'] = array(
+    'description' => 'Fediverse accounts this site follows.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'actor_uri' => array(
+        'description' => 'Remote actor URI.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'inbox_uri' => array(
+        'description' => 'Remote inbox URI.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'username' => array(
+        'description' => 'Actor handle (without @domain).',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'domain' => array(
+        'description' => 'Actor instance domain.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'display_name' => array(
+        'description' => 'Actor display name.',
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => TRUE,
+        'default' => '',
+      ),
+      'avatar_url' => array(
+        'description' => 'Actor avatar URL.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => FALSE,
+      ),
+      'status' => array(
+        'description' => 'Follow status: pending, accepted, or rejected.',
+        'type' => 'varchar',
+        'length' => 16,
+        'not null' => TRUE,
+        'default' => 'pending',
+      ),
+      'follow_activity_id' => array(
+        'description' => 'The ID of our Follow activity (used to build Undo Follow).',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => FALSE,
+      ),
+      'created' => array(
+        'description' => 'Unix timestamp when we sent the Follow.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'indexes' => array(
+      'actor_uri' => array(array('actor_uri', 255)),
+    ),
+  );
+
+  $schema['backdrop_federation_feed'] = array(
+    'description' => 'Posts received from followed Fediverse accounts.',
+    'fields' => array(
+      'id' => array(
+        'description' => 'Primary key.',
+        'type' => 'serial',
+        'unsigned' => TRUE,
+        'not null' => TRUE,
+      ),
+      'actor_uri' => array(
+        'description' => 'The actor who created this post.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'object_id' => array(
+        'description' => 'The ActivityPub object ID (used for deduplication and updates).',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => TRUE,
+      ),
+      'object_type' => array(
+        'description' => 'Object type, e.g. Note or Article.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => 'Note',
+      ),
+      'activity_type' => array(
+        'description' => 'Activity type: Create or Update.',
+        'type' => 'varchar',
+        'length' => 32,
+        'not null' => TRUE,
+        'default' => 'Create',
+      ),
+      'content' => array(
+        'description' => 'Sanitized HTML content of the post.',
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => TRUE,
+      ),
+      'object_json' => array(
+        'description' => 'Full raw JSON of the ActivityPub object.',
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => TRUE,
+      ),
+      'published' => array(
+        'description' => 'Unix timestamp from the original post.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+      'received' => array(
+        'description' => 'Unix timestamp when this site received the post.',
+        'type' => 'int',
+        'not null' => TRUE,
+        'default' => 0,
+      ),
+    ),
+    'primary key' => array('id'),
+    'indexes' => array(
+      'object_id' => array(array('object_id', 255)),
+      'actor_uri' => array(array('actor_uri', 255)),
+      'published' => array('published'),
+    ),
+  );
+
+  return $schema;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function backdrop_federation_follow_uninstall() {
+  db_drop_table('backdrop_federation_following');
+  db_drop_table('backdrop_federation_feed');
+}

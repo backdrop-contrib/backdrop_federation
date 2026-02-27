@@ -1,0 +1,358 @@
+<?php
+/**
+ * @file
+ * Backdrop Federation Follow sub-module.
+ *
+ * Allows this site to follow other Fediverse accounts and receive their posts
+ * into a local feed.
+ */
+
+/**
+ * Implements hook_menu().
+ */
+function backdrop_federation_follow_menu() {
+  $items = array();
+
+  // Following management tab.
+  $items['admin/config/services/fediverse/following'] = array(
+    'title' => 'Following',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_follow_admin_form'),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation_follow.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 15,
+  );
+
+  // Incoming feed tab.
+  $items['admin/config/services/fediverse/feed'] = array(
+    'title' => 'Feed',
+    'page callback' => 'backdrop_federation_follow_admin_feed_page',
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation_follow.admin.inc',
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 17,
+  );
+
+  // Unfollow confirm page.
+  $items['admin/config/services/fediverse/following/unfollow/%'] = array(
+    'title' => 'Unfollow',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_follow_unfollow_confirm', 6),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation_follow.admin.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  return $items;
+}
+
+/**
+ * Implements hook_backdrop_federation_inbox_activity().
+ *
+ * Processes incoming ActivityPub activities relevant to accounts we follow:
+ * - Accept/Reject: updates the follow status in our following table.
+ * - Create/Update/Delete: stores or removes posts in the local feed.
+ *
+ * @param array $activity
+ *   The incoming ActivityPub activity array.
+ */
+function backdrop_federation_follow_backdrop_federation_inbox_activity($activity) {
+  $type = isset($activity['type']) ? $activity['type'] : '';
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+
+  switch ($type) {
+    case 'Accept':
+      // Remote server accepted our Follow request — mark as accepted.
+      $updated = db_update('backdrop_federation_following')
+        ->fields(array('status' => 'accepted'))
+        ->condition('actor_uri', $actor_uri)
+        ->condition('status', 'pending')
+        ->execute();
+
+      if ($updated) {
+        watchdog('backdrop_federation_follow', 'Follow accepted by @actor', array('@actor' => $actor_uri), WATCHDOG_INFO);
+      }
+      break;
+
+    case 'Reject':
+      // Remote server rejected our Follow request.
+      db_update('backdrop_federation_following')
+        ->fields(array('status' => 'rejected'))
+        ->condition('actor_uri', $actor_uri)
+        ->condition('status', 'pending')
+        ->execute();
+
+      watchdog('backdrop_federation_follow', 'Follow rejected by @actor', array('@actor' => $actor_uri), WATCHDOG_WARNING);
+      break;
+
+    case 'Create':
+      _backdrop_federation_follow_handle_create($activity);
+      break;
+
+    case 'Update':
+      _backdrop_federation_follow_handle_update($activity);
+      break;
+
+    case 'Delete':
+      _backdrop_federation_follow_handle_delete($activity);
+      break;
+  }
+}
+
+/**
+ * Store a new post from a followed account in the local feed.
+ *
+ * @param array $activity
+ *   The incoming Create activity.
+ */
+function _backdrop_federation_follow_handle_create($activity) {
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  if (!$actor_uri) {
+    return;
+  }
+
+  // Only store posts from accounts we actively follow (and whose follow is accepted).
+  $following = db_select('backdrop_federation_following', 'f')
+    ->fields('f', array('id', 'status'))
+    ->condition('actor_uri', $actor_uri)
+    ->execute()
+    ->fetchObject();
+
+  if (!$following || $following->status !== 'accepted') {
+    return;
+  }
+
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+  if (!is_array($object) || empty($object['id'])) {
+    return;
+  }
+
+  // Deduplicate by object ID.
+  $existing = db_select('backdrop_federation_feed', 'f')
+    ->fields('f', array('id'))
+    ->condition('object_id', substr($object['id'], 0, 2048))
+    ->execute()
+    ->fetchField();
+
+  if ($existing !== FALSE) {
+    return;
+  }
+
+  $content = isset($object['content']) ? filter_xss($object['content']) : '';
+  $published = !empty($object['published']) ? strtotime($object['published']) : REQUEST_TIME;
+  $object_type = isset($object['type']) ? $object['type'] : 'Note';
+
+  db_insert('backdrop_federation_feed')
+    ->fields(array(
+      'actor_uri' => $actor_uri,
+      'object_id' => substr($object['id'], 0, 2048),
+      'object_type' => $object_type,
+      'activity_type' => 'Create',
+      'content' => $content,
+      'object_json' => json_encode($object, JSON_UNESCAPED_SLASHES),
+      'published' => $published,
+      'received' => REQUEST_TIME,
+    ))
+    ->execute();
+
+  watchdog('backdrop_federation_follow', 'Stored post from @actor in feed.', array('@actor' => $actor_uri), WATCHDOG_INFO);
+}
+
+/**
+ * Update a stored feed post when an Update activity arrives.
+ *
+ * @param array $activity
+ *   The incoming Update activity.
+ */
+function _backdrop_federation_follow_handle_update($activity) {
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+
+  if (!is_array($object) || empty($object['id'])) {
+    return;
+  }
+
+  $object_id = substr($object['id'], 0, 2048);
+
+  $existing = db_select('backdrop_federation_feed', 'f')
+    ->fields('f', array('id'))
+    ->condition('object_id', $object_id)
+    ->condition('actor_uri', $actor_uri)
+    ->execute()
+    ->fetchField();
+
+  if ($existing === FALSE) {
+    return;
+  }
+
+  $content = isset($object['content']) ? filter_xss($object['content']) : '';
+
+  db_update('backdrop_federation_feed')
+    ->fields(array(
+      'content' => $content,
+      'object_json' => json_encode($object, JSON_UNESCAPED_SLASHES),
+      'activity_type' => 'Update',
+    ))
+    ->condition('object_id', $object_id)
+    ->execute();
+
+  watchdog('backdrop_federation_follow', 'Updated feed post from @actor.', array('@actor' => $actor_uri), WATCHDOG_DEBUG);
+}
+
+/**
+ * Remove a post from the feed when a Delete activity arrives.
+ *
+ * @param array $activity
+ *   The incoming Delete activity.
+ */
+function _backdrop_federation_follow_handle_delete($activity) {
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+
+  if (is_string($object)) {
+    $object_id = $object;
+  }
+  elseif (is_array($object) && !empty($object['id'])) {
+    $object_id = $object['id'];
+  }
+  else {
+    return;
+  }
+
+  db_delete('backdrop_federation_feed')
+    ->condition('object_id', substr($object_id, 0, 2048))
+    ->condition('actor_uri', $actor_uri)
+    ->execute();
+}
+
+/**
+ * Send a Follow activity to a remote actor's inbox.
+ *
+ * @param string $actor_uri
+ *   The remote actor URI.
+ * @param string $inbox_uri
+ *   The remote inbox URI to POST to.
+ *
+ * @return string|false
+ *   The Follow activity ID string on success, or FALSE on failure.
+ */
+function _backdrop_federation_follow_send_follow($actor_uri, $inbox_uri) {
+  global $base_url;
+
+  $activity_id = $base_url . '/fediverse/activity/follow/' . backdrop_hash_base64(uniqid('follow', TRUE));
+
+  $activity = array(
+    '@context' => 'https://www.w3.org/ns/activitystreams',
+    'id' => $activity_id,
+    'type' => 'Follow',
+    'actor' => backdrop_federation_get_actor_uri(),
+    'object' => $actor_uri,
+  );
+
+  $json = json_encode($activity, JSON_UNESCAPED_SLASHES);
+
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+  $result = backdrop_federation_post_to_inbox($inbox_uri, $json);
+
+  return ($result !== FALSE) ? $activity_id : FALSE;
+}
+
+/**
+ * Send an Undo Follow activity to a remote actor's inbox.
+ *
+ * @param string $actor_uri
+ *   The remote actor URI.
+ * @param string $inbox_uri
+ *   The remote inbox URI to POST to.
+ * @param string $follow_activity_id
+ *   The ID of the original Follow activity being undone.
+ *
+ * @return bool
+ *   TRUE if the request was sent successfully.
+ */
+function _backdrop_federation_follow_send_unfollow($actor_uri, $inbox_uri, $follow_activity_id) {
+  global $base_url;
+
+  $activity = array(
+    '@context' => 'https://www.w3.org/ns/activitystreams',
+    'id' => $base_url . '/fediverse/activity/unfollow/' . backdrop_hash_base64(uniqid('unfollow', TRUE)),
+    'type' => 'Undo',
+    'actor' => backdrop_federation_get_actor_uri(),
+    'object' => array(
+      'id' => $follow_activity_id,
+      'type' => 'Follow',
+      'actor' => backdrop_federation_get_actor_uri(),
+      'object' => $actor_uri,
+    ),
+  );
+
+  $json = json_encode($activity, JSON_UNESCAPED_SLASHES);
+
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+  return backdrop_federation_post_to_inbox($inbox_uri, $json) !== FALSE;
+}
+
+/**
+ * Resolve a @user@domain handle to actor data via WebFinger.
+ *
+ * @param string $handle
+ *   The handle (with or without leading @), e.g. "user@mastodon.social".
+ *
+ * @return array|false
+ *   Associative array with keys: actor_uri, inbox_uri, username, domain,
+ *   display_name, avatar_url. Returns FALSE on failure.
+ */
+function _backdrop_federation_follow_resolve_handle($handle) {
+  $handle = ltrim($handle, '@');
+  $parts = explode('@', $handle, 2);
+  if (count($parts) !== 2) {
+    return FALSE;
+  }
+  list($username, $domain) = $parts;
+
+  // WebFinger to get the actor URI.
+  $webfinger_url = 'https://' . $domain . '/.well-known/webfinger?resource=' . urlencode('acct:' . $username . '@' . $domain);
+  $response = backdrop_http_request($webfinger_url, array(
+    'headers' => array('Accept' => 'application/jrd+json, application/json'),
+  ));
+
+  if ($response->code != 200) {
+    watchdog('backdrop_federation_follow', 'WebFinger lookup failed for @handle: HTTP @code', array(
+      '@handle' => '@' . $handle,
+      '@code' => $response->code,
+    ), WATCHDOG_WARNING);
+    return FALSE;
+  }
+
+  $data = json_decode($response->data, TRUE);
+  $actor_uri = NULL;
+  foreach ((array) $data['links'] as $link) {
+    if (isset($link['rel'], $link['href']) && $link['rel'] === 'self' &&
+        isset($link['type']) && strpos($link['type'], 'activity+json') !== FALSE) {
+      $actor_uri = $link['href'];
+      break;
+    }
+  }
+
+  if (!$actor_uri) {
+    watchdog('backdrop_federation_follow', 'No actor URI found in WebFinger response for @handle', array('@handle' => '@' . $handle), WATCHDOG_WARNING);
+    return FALSE;
+  }
+
+  // Fetch the full actor object.
+  module_load_include('inc', 'backdrop_federation', 'backdrop_federation.pages');
+  $actor = _backdrop_federation_fetch_actor($actor_uri);
+  if (!$actor) {
+    return FALSE;
+  }
+
+  return array(
+    'actor_uri' => $actor_uri,
+    'inbox_uri' => $actor['inbox'],
+    'username' => isset($actor['preferredUsername']) ? $actor['preferredUsername'] : $username,
+    'domain' => $domain,
+    'display_name' => isset($actor['name']) ? $actor['name'] : $username,
+    'avatar_url' => isset($actor['icon']['url']) ? $actor['icon']['url'] : NULL,
+  );
+}

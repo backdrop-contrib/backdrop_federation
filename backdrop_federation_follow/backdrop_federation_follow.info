@@ -1,0 +1,6 @@
+name = Backdrop Federation Follow
+description = Follow other Fediverse accounts and display their posts in a feed on this site.
+type = module
+backdrop = 1.x
+dependencies[] = backdrop_federation
+package = Social

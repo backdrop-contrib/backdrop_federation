@@ -1,6 +1,6 @@
 name = Backdrop Federation
 description = Enables ActivityPub federation, allowing Fediverse users to follow this site and receive posts as well as reply, like, and boost them.
-package = Web services
+package = Social
 backdrop = 1.x
 type = module
 
