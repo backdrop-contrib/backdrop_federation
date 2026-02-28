@@ -29,6 +29,20 @@ function backdrop_federation_follow_admin_form($form, &$form_state) {
     ->fetchAll();
 
   if ($following) {
+    // Show "Pause All" link only when at least one account is active.
+    $active_count = 0;
+    foreach ($following as $account) {
+      if (in_array($account->status, array('pending', 'accepted'))) {
+        $active_count++;
+      }
+    }
+    if ($active_count) {
+      $form['pause_all_link'] = array(
+        '#markup' => '<p style="text-align: right">' . l(t('Pause all active follows'), 'admin/config/services/fediverse/following/pause-all') . '</p>',
+        '#weight' => -9,
+      );
+    }
+
     $header = array(t('Account'), t('Display name'), t('Status'), t('Since'), t('Actions'));
     $rows = array();
     foreach ($following as $account) {
@@ -389,6 +403,94 @@ function backdrop_federation_follow_resume_confirm_submit($form, &$form_state) {
 
   backdrop_set_message(t('Follow request resent to @handle. Status will update to "Accepted" once their server responds.', array('@handle' => $handle)));
   watchdog('backdrop_federation_follow', 'Resumed following @actor', array('@actor' => $actor_uri), WATCHDOG_INFO);
+  $form_state['redirect'] = 'admin/config/services/fediverse/following';
+}
+
+/**
+ * Confirm form for pausing all active followed accounts.
+ *
+ * Sends Undo Follow to every pending or accepted account and marks them all
+ * as paused, so they can be resumed individually later.
+ */
+function backdrop_federation_follow_pause_all_confirm($form, &$form_state) {
+  $count = db_select('backdrop_federation_following', 'f')
+    ->condition('status', array('pending', 'accepted'), 'IN')
+    ->countQuery()
+    ->execute()
+    ->fetchField();
+
+  if (!$count) {
+    backdrop_set_message(t('No active follows to pause.'), 'warning');
+    backdrop_goto('admin/config/services/fediverse/following');
+  }
+
+  return confirm_form(
+    $form,
+    t('Pause all active follows?'),
+    'admin/config/services/fediverse/following',
+    format_plural(
+      $count,
+      'This will send an Undo Follow to 1 account and stop their posts from being delivered to this site. All accounts will remain listed so you can resume them individually later.',
+      'This will send an Undo Follow to @count accounts and stop their posts from being delivered to this site. All accounts will remain listed so you can resume them individually later.'
+    ),
+    t('Pause all'),
+    t('Cancel')
+  );
+}
+
+/**
+ * Submit handler for the pause-all confirm form.
+ */
+function backdrop_federation_follow_pause_all_confirm_submit($form, &$form_state) {
+  $accounts = db_select('backdrop_federation_following', 'f')
+    ->fields('f')
+    ->condition('status', array('pending', 'accepted'), 'IN')
+    ->execute()
+    ->fetchAll();
+
+  $paused = 0;
+  $failed = 0;
+
+  foreach ($accounts as $account) {
+    $result = _backdrop_federation_follow_send_unfollow(
+      $account->actor_uri,
+      $account->inbox_uri,
+      $account->follow_activity_id
+    );
+
+    db_update('backdrop_federation_following')
+      ->fields(array('status' => 'paused'))
+      ->condition('id', $account->id)
+      ->execute();
+
+    if ($result) {
+      $paused++;
+    }
+    else {
+      $failed++;
+    }
+  }
+
+  if ($paused) {
+    backdrop_set_message(format_plural(
+      $paused,
+      'Paused 1 account. Their accounts remain listed so you can resume them individually later.',
+      'Paused @count accounts. Their accounts remain listed so you can resume them individually later.'
+    ));
+  }
+  if ($failed) {
+    backdrop_set_message(format_plural(
+      $failed,
+      '1 Undo Follow could not be delivered (check the log), but the account has been paused locally.',
+      '@count Undo Follow activities could not be delivered (check the log), but those accounts have been paused locally.'
+    ), 'warning');
+  }
+
+  watchdog('backdrop_federation_follow', 'Paused all active follows: @paused paused, @failed delivery failures.', array(
+    '@paused' => $paused,
+    '@failed' => $failed,
+  ), WATCHDOG_INFO);
+
   $form_state['redirect'] = 'admin/config/services/fediverse/following';
 }
 
