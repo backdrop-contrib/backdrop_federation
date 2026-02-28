@@ -141,6 +141,13 @@ function backdrop_federation_verify_signature() {
       elseif ($header_name === 'host' && isset($_SERVER['HTTP_HOST'])) {
         $signing_parts[] = 'host: ' . $_SERVER['HTTP_HOST'];
       }
+      // PHP does not apply the HTTP_ prefix to Content-Type or Content-Length.
+      elseif ($header_name === 'content-type' && isset($_SERVER['CONTENT_TYPE'])) {
+        $signing_parts[] = 'content-type: ' . $_SERVER['CONTENT_TYPE'];
+      }
+      elseif ($header_name === 'content-length' && isset($_SERVER['CONTENT_LENGTH'])) {
+        $signing_parts[] = 'content-length: ' . $_SERVER['CONTENT_LENGTH'];
+      }
     }
   }
 
@@ -161,14 +168,7 @@ function backdrop_federation_verify_signature() {
     return TRUE;
   }
   elseif ($result === 0) {
-    // Temporary diagnostic logging — remove after root cause is identified.
-    watchdog('backdrop_federation', 'Signature verification failed. keyId=@keyid | headers=@headers | HTTP_HOST=@host | REQUEST_URI=@uri | signing_string=@signing', array(
-      '@keyid'   => $params['keyId'],
-      '@headers' => $params['headers'],
-      '@host'    => isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : '(missing)',
-      '@uri'     => isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '(missing)',
-      '@signing' => $signing_string,
-    ), WATCHDOG_WARNING);
+    watchdog('backdrop_federation', 'Signature verification failed.', array(), WATCHDOG_WARNING);
     return FALSE;
   }
   else {
