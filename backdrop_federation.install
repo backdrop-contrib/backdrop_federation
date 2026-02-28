@@ -317,7 +317,10 @@ function backdrop_federation_install() {
  * Implements hook_uninstall().
  */
 function backdrop_federation_uninstall() {
-  // Config is automatically deleted by Backdrop.
+  // Remove any pending items in the delivery queue.
+  $queue = BackdropQueue::get('backdrop_federation_activity_delivery');
+  $queue->deleteQueue();
+  // DB tables (hook_schema) and config files are automatically removed by Backdrop.
 }
 
 /**

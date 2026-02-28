@@ -159,6 +159,46 @@ function backdrop_federation_follow_schema() {
  * Implements hook_uninstall().
  */
 function backdrop_federation_follow_uninstall() {
-  db_drop_table('backdrop_federation_following');
-  db_drop_table('backdrop_federation_feed');
+  // Send Undo Follow to all active followed accounts so remote servers stop
+  // delivering to this inbox. This is best-effort: failures are logged but do
+  // not block the uninstall. Paused accounts already received an Undo Follow
+  // when they were paused, so only pending and accepted follows are notified.
+  $following = db_select('backdrop_federation_following', 'f')
+    ->fields('f')
+    ->condition('status', array('pending', 'accepted'), 'IN')
+    ->execute()
+    ->fetchAll();
+
+  if (!empty($following)) {
+    module_load_include('module', 'backdrop_federation');
+    module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+
+    $actor_uri = backdrop_federation_get_actor_uri();
+
+    foreach ($following as $account) {
+      $undo = array(
+        '@context' => 'https://www.w3.org/ns/activitystreams',
+        'id' => $actor_uri . '#undo-follow-' . $account->id . '-' . REQUEST_TIME,
+        'type' => 'Undo',
+        'actor' => $actor_uri,
+        'object' => array(
+          'id' => $account->follow_activity_id,
+          'type' => 'Follow',
+          'actor' => $actor_uri,
+          'object' => $account->actor_uri,
+        ),
+      );
+
+      $json = json_encode($undo, JSON_UNESCAPED_SLASHES);
+      $result = backdrop_federation_post_to_inbox($account->inbox_uri, $json);
+
+      if (!$result) {
+        watchdog('backdrop_federation_follow', 'Uninstall: could not send Undo Follow to @actor', array(
+          '@actor' => $account->actor_uri,
+        ), WATCHDOG_WARNING);
+      }
+    }
+  }
+
+  // DB tables (hook_schema) are automatically dropped by Backdrop on uninstall.
 }
