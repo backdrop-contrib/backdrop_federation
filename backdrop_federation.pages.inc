@@ -261,9 +261,11 @@ function backdrop_federation_inbox_endpoint() {
       return _backdrop_federation_handle_like($activity);
 
     case 'Announce':
+      module_invoke_all('backdrop_federation_inbox_activity', $activity);
       return _backdrop_federation_handle_announce($activity);
 
     case 'Undo':
+      module_invoke_all('backdrop_federation_inbox_activity', $activity);
       $undo_type = isset($activity['object']['type']) ? $activity['object']['type'] : '';
       if ($undo_type === 'Follow') {
         return _backdrop_federation_handle_undo_follow($activity);
@@ -680,6 +682,7 @@ function _backdrop_federation_fetch_actor($actor_uri) {
     'headers' => array(
       'Accept' => 'application/activity+json, application/ld+json',
     ),
+    'timeout' => 10,
   );
 
   $response = backdrop_http_request($actor_uri, $options);

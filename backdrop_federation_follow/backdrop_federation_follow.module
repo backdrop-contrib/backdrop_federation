@@ -25,21 +25,38 @@ function backdrop_federation_follow_config_info() {
  * Deletes feed posts older than the configured retention period.
  */
 function backdrop_federation_follow_cron() {
-  $retention = config_get('backdrop_federation_follow.settings', 'feed_retention');
-
-  // 0 means keep forever.
-  if (empty($retention) || $retention === '0') {
-    return;
-  }
-
-  $cutoff = REQUEST_TIME - (int) $retention;
-  $deleted = db_delete('backdrop_federation_feed')
-    ->condition('received', $cutoff, '<')
-    ->execute();
-
+  $deleted = _backdrop_federation_follow_expire_feed_posts();
   if ($deleted) {
     watchdog('backdrop_federation_follow', 'Cron removed @count expired feed posts.', array('@count' => $deleted), WATCHDOG_INFO);
   }
+}
+
+/**
+ * Delete feed posts older than the configured retention period.
+ *
+ * Shared by hook_cron() and the settings submit handler so that changing the
+ * retention setting takes effect immediately rather than waiting for the next
+ * cron run.
+ *
+ * @param int|null $retention
+ *   Retention period in seconds, or NULL to read from config.
+ *
+ * @return int
+ *   Number of posts deleted.
+ */
+function _backdrop_federation_follow_expire_feed_posts($retention = NULL) {
+  if ($retention === NULL) {
+    $retention = config_get('backdrop_federation_follow.settings', 'feed_retention');
+  }
+
+  // 0 / empty means keep forever.
+  if (empty($retention) || $retention === '0' || (int) $retention === 0) {
+    return 0;
+  }
+
+  return (int) db_delete('backdrop_federation_feed')
+    ->condition('received', REQUEST_TIME - (int) $retention, '<')
+    ->execute();
 }
 
 /**
@@ -74,6 +91,26 @@ function backdrop_federation_follow_menu() {
     'title' => 'Unfollow',
     'page callback' => 'backdrop_get_form',
     'page arguments' => array('backdrop_federation_follow_unfollow_confirm', 6),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation_follow.admin.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Pause confirm page.
+  $items['admin/config/services/fediverse/following/pause/%'] = array(
+    'title' => 'Pause',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_follow_pause_confirm', 6),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation_follow.admin.inc',
+    'type' => MENU_CALLBACK,
+  );
+
+  // Resume confirm page.
+  $items['admin/config/services/fediverse/following/resume/%'] = array(
+    'title' => 'Resume',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_follow_resume_confirm', 6),
     'access arguments' => array('administer backdrop_federation'),
     'file' => 'backdrop_federation_follow.admin.inc',
     'type' => MENU_CALLBACK,
@@ -119,6 +156,14 @@ function backdrop_federation_follow_backdrop_federation_inbox_activity($activity
         ->execute();
 
       watchdog('backdrop_federation_follow', 'Follow rejected by @actor', array('@actor' => $actor_uri), WATCHDOG_WARNING);
+      break;
+
+    case 'Announce':
+      _backdrop_federation_follow_handle_announce($activity);
+      break;
+
+    case 'Undo':
+      _backdrop_federation_follow_handle_undo($activity);
       break;
 
     case 'Create':
@@ -174,7 +219,7 @@ function _backdrop_federation_follow_handle_create($activity) {
     return;
   }
 
-  $content = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'])) : '';
+  $content = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'], array('a', 'em', 'strong', 'cite', 'blockquote', 'code', 'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'p', 'br', 'span'))) : '';
   $published = !empty($object['published']) ? strtotime($object['published']) : REQUEST_TIME;
   $object_type = isset($object['type']) ? $object['type'] : 'Note';
 
@@ -221,7 +266,7 @@ function _backdrop_federation_follow_handle_update($activity) {
     return;
   }
 
-  $content = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'])) : '';
+  $content = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'], array('a', 'em', 'strong', 'cite', 'blockquote', 'code', 'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'p', 'br', 'span'))) : '';
 
   db_update('backdrop_federation_feed')
     ->fields(array(
@@ -259,6 +304,157 @@ function _backdrop_federation_follow_handle_delete($activity) {
     ->condition('object_id', substr($object_id, 0, 2048))
     ->condition('actor_uri', $actor_uri)
     ->execute();
+}
+
+/**
+ * Remove a post from the feed when a followed account un-boosts it.
+ *
+ * Only handles Undo Announce. Other Undo types (Follow, Like) are ignored
+ * here — they are handled by the parent module.
+ *
+ * @param array $activity
+ *   The incoming Undo activity.
+ */
+function _backdrop_federation_follow_handle_undo($activity) {
+  $undo_type = isset($activity['object']['type']) ? $activity['object']['type'] : '';
+  if ($undo_type !== 'Announce') {
+    return;
+  }
+
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  if (!$actor_uri) {
+    return;
+  }
+
+  // The boosted post URI is the inner object of the Announce.
+  $boosted = isset($activity['object']['object']) ? $activity['object']['object'] : NULL;
+  if (!$boosted) {
+    return;
+  }
+
+  // May arrive as a plain URI string or as an embedded object.
+  if (is_array($boosted)) {
+    $boosted = isset($boosted['id']) ? $boosted['id'] : NULL;
+  }
+
+  if (!$boosted) {
+    return;
+  }
+
+  db_delete('backdrop_federation_feed')
+    ->condition('actor_uri', $actor_uri)
+    ->condition('object_id', substr($boosted, 0, 2048))
+    ->condition('activity_type', 'Announce')
+    ->execute();
+
+  watchdog('backdrop_federation_follow', 'Removed un-boosted post from feed (actor: @actor).', array('@actor' => $actor_uri), WATCHDOG_INFO);
+}
+
+/**
+ * Store a boosted post from a followed account in the local feed.
+ *
+ * Only runs when the global "include_boosts" setting is enabled. Fetches the
+ * boosted object from the remote server if it is not embedded in the activity.
+ * Deduplicates by object_id so the same post is never stored twice regardless
+ * of how many followed accounts boost it.
+ *
+ * @param array $activity
+ *   The incoming Announce activity.
+ */
+function _backdrop_federation_follow_handle_announce($activity) {
+  if (!config_get('backdrop_federation_follow.settings', 'include_boosts')) {
+    return;
+  }
+
+  $actor_uri = isset($activity['actor']) ? $activity['actor'] : '';
+  if (!$actor_uri) {
+    return;
+  }
+
+  // Only process boosts from accounts we actively follow.
+  $following = db_select('backdrop_federation_following', 'f')
+    ->fields('f', array('id', 'status'))
+    ->condition('actor_uri', $actor_uri)
+    ->execute()
+    ->fetchObject();
+
+  if (!$following || $following->status !== 'accepted') {
+    return;
+  }
+
+  $object = isset($activity['object']) ? $activity['object'] : NULL;
+  if (!$object) {
+    return;
+  }
+
+  // If the object is a URI string, fetch the full object from the remote server.
+  if (is_string($object)) {
+    $object = _backdrop_federation_follow_fetch_object($object);
+    if (!$object) {
+      watchdog('backdrop_federation_follow', 'Could not fetch boosted object for Announce from @actor.', array('@actor' => $actor_uri), WATCHDOG_WARNING);
+      return;
+    }
+  }
+
+  if (!is_array($object) || empty($object['id'])) {
+    return;
+  }
+
+  // Deduplicate globally — if we already have this post (via Create or a
+  // previous boost), skip it to avoid showing the same content twice.
+  $existing = db_select('backdrop_federation_feed', 'f')
+    ->fields('f', array('id'))
+    ->condition('object_id', substr($object['id'], 0, 2048))
+    ->execute()
+    ->fetchField();
+
+  if ($existing !== FALSE) {
+    return;
+  }
+
+  $content     = isset($object['content']) ? _backdrop_federation_follow_strip_emoji(filter_xss($object['content'], array('a', 'em', 'strong', 'cite', 'blockquote', 'code', 'ul', 'ol', 'li', 'dl', 'dt', 'dd', 'p', 'br', 'span'))) : '';
+  $published   = !empty($activity['published']) ? strtotime($activity['published']) : REQUEST_TIME;
+  $object_type = isset($object['type']) ? $object['type'] : 'Note';
+
+  db_insert('backdrop_federation_feed')
+    ->fields(array(
+      'actor_uri'     => $actor_uri,
+      'object_id'     => substr($object['id'], 0, 2048),
+      'object_type'   => $object_type,
+      'activity_type' => 'Announce',
+      'content'       => $content,
+      'object_json'   => json_encode($object, JSON_UNESCAPED_SLASHES),
+      'published'     => $published,
+      'received'      => REQUEST_TIME,
+    ))
+    ->execute();
+
+  watchdog('backdrop_federation_follow', 'Stored boost from @actor in feed.', array('@actor' => $actor_uri), WATCHDOG_INFO);
+}
+
+/**
+ * Fetch a remote ActivityPub object by URI.
+ *
+ * @param string $uri
+ *   The object URI to fetch.
+ *
+ * @return array|false
+ *   Decoded object array, or FALSE on failure.
+ */
+function _backdrop_federation_follow_fetch_object($uri) {
+  $response = backdrop_http_request($uri, array(
+    'headers' => array(
+      'Accept' => 'application/activity+json, application/ld+json',
+    ),
+    'timeout' => 10,
+  ));
+
+  if ($response->code != 200) {
+    return FALSE;
+  }
+
+  $data = json_decode($response->data, TRUE);
+  return (is_array($data) && !empty($data['id'])) ? $data : FALSE;
 }
 
 /**
@@ -350,6 +546,7 @@ function _backdrop_federation_follow_resolve_handle($handle) {
   $webfinger_url = 'https://' . $domain . '/.well-known/webfinger?resource=' . urlencode('acct:' . $username . '@' . $domain);
   $response = backdrop_http_request($webfinger_url, array(
     'headers' => array('Accept' => 'application/jrd+json, application/json'),
+    'timeout' => 10,
   ));
 
   if ($response->code != 200) {
@@ -437,6 +634,7 @@ function backdrop_federation_follow_block_configure($delta = '', $settings = arr
         15 => 15,
         20 => 20,
         25 => 25,
+        50 => 50,
       ),
       '#default_value' => isset($settings['count']) ? $settings['count'] : 10,
     );
@@ -528,14 +726,23 @@ function backdrop_federation_follow_block_view($delta = '', $settings = array(),
     );
   }
 
+  // Pre-fetch all account info in one query to avoid N+1 queries in the loop.
+  $actor_uris = array_unique(array_column((array) $rows, 'actor_uri'));
+  $accounts = array();
+  if (!empty($actor_uris)) {
+    $result = db_select('backdrop_federation_following', 'f')
+      ->fields('f', array('actor_uri', 'username', 'domain', 'display_name', 'avatar_url'))
+      ->condition('actor_uri', $actor_uris, 'IN')
+      ->execute();
+    foreach ($result as $account) {
+      $accounts[$account->actor_uri] = $account;
+    }
+  }
+
   $output = '';
 
   foreach ($rows as $row) {
-    $account = db_select('backdrop_federation_following', 'f')
-      ->fields('f', array('username', 'domain', 'display_name', 'avatar_url'))
-      ->condition('actor_uri', $row->actor_uri)
-      ->execute()
-      ->fetchObject();
+    $account = isset($accounts[$row->actor_uri]) ? $accounts[$row->actor_uri] : NULL;
 
     $handle       = $account
       ? ('@' . check_plain($account->username) . '@' . check_plain($account->domain))
@@ -545,13 +752,28 @@ function backdrop_federation_follow_block_view($delta = '', $settings = array(),
     $object       = json_decode($row->object_json, TRUE);
     $original_url = isset($object['url']) ? $object['url'] : (isset($object['id']) ? $object['id'] : NULL);
 
-    // Optionally truncate post content.
-    $text = strip_tags($row->content);
-    if ($truncate_length > 0 && strlen($text) > $truncate_length) {
-      $text = check_plain(truncate_utf8($text, $truncate_length, TRUE, TRUE));
+    // The stored content was already sanitized via filter_xss() at ingest time,
+    // so it is safe to output as HTML — links, formatting, and mentions are
+    // preserved. Only fall back to stripped plain text when truncation is
+    // enabled and the content actually exceeds the limit.
+    // Replace block-level closing tags with a space before stripping, so that
+    // words from adjacent paragraphs don't run together in the plain-text
+    // truncation path.
+    $spaced = preg_replace('/<\/?(p|br|div|li)[^>]*>/i', ' ', $row->content);
+    $plain  = trim(preg_replace('/\s+/', ' ', html_entity_decode(strip_tags($spaced), ENT_QUOTES, 'UTF-8')));
+    if ($truncate_length > 0 && strlen($plain) > $truncate_length) {
+      $text = check_plain(truncate_utf8($plain, $truncate_length, TRUE, TRUE));
     }
     else {
-      $text = check_plain($text);
+      // Output stored HTML (already sanitized via filter_xss at ingest), but
+      // convert hashtag links to plain text — hashtag search URLs are
+      // server-specific and don't work when clicked from another site.
+      // Hashtag links are identified by rel="tag" per the ActivityPub spec.
+      $text = preg_replace_callback(
+        '/<a\b[^>]*\brel=["\'][^"\']*\btag\b[^"\']*["\'][^>]*>(.*?)<\/a>/is',
+        function($matches) { return strip_tags($matches[1]); },
+        $row->content
+      );
     }
 
     // Avatar.
@@ -561,11 +783,31 @@ function backdrop_federation_follow_block_view($delta = '', $settings = array(),
         . ' class="fediverse-feed-avatar">';
     }
 
+    $boost_line = '';
+    if ($row->activity_type === 'Announce') {
+      // Capture the booster's avatar before we replace the display info.
+      $booster_avatar = $avatar_html;
+      $boost_line = '<div class="fediverse-feed-boost">'
+        . $booster_avatar
+        . '&#x21BA; '
+        . t('Boosted by !handle', array('!handle' => '<strong>' . $display_name . '</strong>'))
+        . '</div>';
+      // Replace main author line with original poster info from object JSON.
+      $object_data    = json_decode($row->object_json, TRUE);
+      $attributed_uri = isset($object_data['attributedTo']) ? $object_data['attributedTo'] : NULL;
+      if ($attributed_uri) {
+        $display_name = check_plain($attributed_uri);
+        $handle       = '';
+        $avatar_html  = '';
+      }
+    }
+
     $output .= '<div class="fediverse-feed-post">';
+    $output .= $boost_line;
     $output .= '<p class="fediverse-feed-meta">'
       . $avatar_html
       . '<strong class="fediverse-feed-display-name">' . $display_name . '</strong>'
-      . ' <span class="fediverse-feed-handle">' . $handle . '</span>'
+      . ($handle ? ' <span class="fediverse-feed-handle">' . $handle . '</span>' : '')
       . ' <span class="fediverse-feed-date">&middot; ' . format_date($row->published, 'short') . '</span>';
     if ($original_url) {
       $output .= ' <span class="fediverse-feed-link">&middot; '
@@ -609,6 +851,7 @@ function backdrop_federation_follow_block_view($delta = '', $settings = array(),
     .fediverse-feed-avatar { width: 32px; height: 32px; border-radius: 50%; vertical-align: middle; margin-right: 0.4em; }
     .fediverse-feed-handle { color: #666; }
     .fediverse-feed-date { color: #666; }
+    .fediverse-feed-boost { font-size: 0.85em; color: #666; margin-bottom: 0.25em; }
     .fediverse-feed-content { margin: 0; }
     .fediverse-feed-image { max-width: ' . $max_image_width . 'px; max-height: ' . $max_image_height . 'px; width: auto; height: auto; display: block; margin-top: 0.5em; }
     .fediverse-feed-all { margin-top: 0.75em; font-size: 0.9em; }

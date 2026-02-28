@@ -221,18 +221,6 @@ function backdrop_federation_deliver_activitypub($result) {
 }
 
 /**
- * Delivery callback for JSON responses.
- *
- * @param mixed $result
- *   The page callback result to deliver.
- */
-function backdrop_federation_deliver_json($result) {
-  backdrop_add_http_header('Content-Type', 'application/json');
-  echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-  backdrop_page_footer();
-}
-
-/**
  * Implements hook_cron_queue_info().
  */
 function backdrop_federation_cron_queue_info() {

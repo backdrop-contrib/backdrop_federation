@@ -211,6 +211,7 @@ function _backdrop_federation_fetch_public_key($key_id) {
     'headers' => array(
       'Accept' => 'application/activity+json, application/ld+json',
     ),
+    'timeout' => 10,
   );
 
   $response = backdrop_http_request($actor_uri, $options);
@@ -261,6 +262,7 @@ function backdrop_federation_post_to_inbox($inbox_uri, $json) {
     'method' => 'POST',
     'data' => $json,
     'headers' => $headers,
+    'timeout' => 15,
   );
 
   $response = backdrop_http_request($inbox_uri, $options);

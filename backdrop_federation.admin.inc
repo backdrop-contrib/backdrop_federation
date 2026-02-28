@@ -545,6 +545,7 @@ function _backdrop_federation_resolve_handle($user, $domain) {
 
   $response = backdrop_http_request($webfinger_url, array(
     'headers' => array('Accept' => 'application/jrd+json, application/json'),
+    'timeout' => 10,
   ));
 
   if ($response->code != 200) {
