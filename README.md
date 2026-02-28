@@ -35,6 +35,38 @@ For a site whose primary purpose is publishing content to an audience that inclu
 Install this module using the official Backdrop CMS instructions. Bugs and feature requests should be reported in the Issue Queue.
 
 ---
+                                                                                        
+##  Getting Started
+                                                                                              
+1. Configure the site actor                               
+
+Go to Administration › Configuration › Web services › Backdrop Federation and open the Settings tab.
+
+- Set an actor username — this becomes the local part of your Fediverse handle (e.g. news gives you @news@yoursite.com)
+- Add a display name and bio that will appear on your profile when viewed from Mastodon or other Fediverse apps
+- Select which content types should be federated — only published nodes of these types will be broadcast to followers
+- Save the settings
+
+2. Verify your handle is discoverable
+
+Your site's Fediverse handle is @username@yourdomain.com. Search for it from any Mastodon account — if your profile appears, WebFinger is working correctly and the site is ready to federate.
+
+Note: The site must be publicly accessible over HTTPS. Federation will not work on localhost or behind a firewall.
+
+3. Follow the site and publish a post
+
+Follow your site's handle from a Mastodon or other Fediverse account. The follower should appear under the Followers tab within a few seconds. Then publish or re-save a node of a federated content type and check that it appears in your Fediverse feed.
+
+4. Try the Follow sub-module (optional)
+
+Enable Backdrop Federation Follow to follow remote Fediverse accounts and receive their posts on your site. Once enabled, two new tabs appear on the settings page:
+
+- Following — enter a @user@domain handle and click Follow; the module resolves the handle and sends a follow request automatically
+- Feed — browse posts received from followed accounts
+
+To display the feed on your site, add the Fediverse Following Feed block to any layout region via Structure › Layouts.
+
+---
 
 ## Included Sub-modules
 
