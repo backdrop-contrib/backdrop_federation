@@ -116,6 +116,16 @@ function backdrop_federation_follow_menu() {
     'type' => MENU_CALLBACK,
   );
 
+  // Pause all confirm page.
+  $items['admin/config/services/fediverse/following/pause-all'] = array(
+    'title' => 'Pause all',
+    'page callback' => 'backdrop_get_form',
+    'page arguments' => array('backdrop_federation_follow_pause_all_confirm'),
+    'access arguments' => array('administer backdrop_federation'),
+    'file' => 'backdrop_federation_follow.admin.inc',
+    'type' => MENU_CALLBACK,
+  );
+
   // Resume confirm page.
   $items['admin/config/services/fediverse/following/resume/%'] = array(
     'title' => 'Resume',
