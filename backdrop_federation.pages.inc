@@ -871,11 +871,15 @@ function _backdrop_federation_handle_create($activity) {
   comment_save($comment);
 
   // Record the mapping so updates/deletes can find this comment.
+  $commenter_inbox = ($actor_data && isset($actor_data['inbox'])) ? $actor_data['inbox'] : NULL;
+
   db_insert('backdrop_federation_received')
     ->fields(array(
       'object_id' => substr($object_id, 0, 2048),
       'cid'       => $comment->cid,
       'nid'       => $nid,
+      'actor_uri' => $actor_uri ?: NULL,
+      'inbox_uri' => $commenter_inbox,
       'created'   => REQUEST_TIME,
     ))
     ->execute();
@@ -1165,4 +1169,57 @@ function backdrop_federation_followers_endpoint() {
 
   backdrop_add_http_header('Access-Control-Allow-Origin', '*');
   return $result;
+}
+
+/**
+ * Page callback: serve a local admin comment reply as an ActivityPub Note.
+ *
+ * URL: fediverse/comment/{cid}
+ *
+ * @param int $cid
+ *   The comment ID from the URL.
+ *
+ * @return array|int
+ *   ActivityPub Note array, or MENU_NOT_FOUND.
+ */
+function backdrop_federation_comment_note_endpoint($cid) {
+  if (!config_get('backdrop_federation.settings', 'enabled')) {
+    return MENU_NOT_FOUND;
+  }
+  $cid = (int) $cid;
+  $comment = $cid ? comment_load($cid) : NULL;
+  if (!$comment || empty($comment->pid)) {
+    return MENU_NOT_FOUND;
+  }
+  $received = db_select('backdrop_federation_received', 'r')
+    ->fields('r', array('object_id', 'actor_uri'))
+    ->condition('cid', $comment->pid)
+    ->execute()
+    ->fetchObject();
+  if (!$received) {
+    return MENU_NOT_FOUND;
+  }
+
+  global $base_url;
+  $actor_uri = backdrop_federation_get_actor_uri();
+  $note_id   = $base_url . '/fediverse/comment/' . $cid;
+  $public    = 'https://www.w3.org/ns/activitystreams#Public';
+
+  $body_item = isset($comment->comment_body[LANGUAGE_NONE][0])
+    ? $comment->comment_body[LANGUAGE_NONE][0]
+    : array('value' => '', 'format' => 'filtered_html');
+
+  backdrop_add_http_header('Access-Control-Allow-Origin', '*');
+  return array(
+    '@context'     => 'https://www.w3.org/ns/activitystreams',
+    'id'           => $note_id,
+    'type'         => 'Note',
+    'attributedTo' => $actor_uri,
+    'inReplyTo'    => $received->object_id,
+    'content'      => check_markup($body_item['value'], $body_item['format']),
+    'published'    => gmdate('c', $comment->created ?: REQUEST_TIME),
+    'to'           => array($public, $received->actor_uri),
+    'cc'           => array($base_url . '/fediverse/followers'),
+    'url'          => $note_id,
+  );
 }

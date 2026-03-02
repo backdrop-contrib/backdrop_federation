@@ -206,6 +206,16 @@ function backdrop_federation_menu() {
     'type' => MENU_CALLBACK,
   );
 
+  // Comment Note endpoint — serves admin reply comments as ActivityPub Notes.
+  $items['fediverse/comment/%'] = array(
+    'page callback'     => 'backdrop_federation_comment_note_endpoint',
+    'page arguments'    => array(2),
+    'access callback'   => TRUE,
+    'file'              => 'backdrop_federation.pages.inc',
+    'type'              => MENU_CALLBACK,
+    'delivery callback' => 'backdrop_federation_deliver_activitypub',
+  );
+
   return $items;
 }
 
@@ -438,6 +448,229 @@ function backdrop_federation_node_delete(Node $node) {
     _backdrop_federation_queue_activity($node, 'Delete');
     _backdrop_federation_deliver_queue_now();
   }
+}
+
+/**
+ * Implements hook_comment_insert().
+ *
+ * When an admin replies to a fediverse comment (pid > 0), deliver a
+ * Create{Note} activity with inReplyTo to the original commenter and all
+ * followers.
+ */
+function backdrop_federation_comment_insert($comment) {
+  if (!config_get('backdrop_federation.settings', 'enabled') || empty($comment->pid)) {
+    return;
+  }
+
+  $received = db_select('backdrop_federation_received', 'r')
+    ->fields('r', array('object_id', 'actor_uri', 'inbox_uri'))
+    ->condition('cid', $comment->pid)
+    ->execute()
+    ->fetchObject();
+
+  if (!$received) {
+    return;
+  }
+
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.activity');
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+
+  $activity = _backdrop_federation_build_comment_reply_activity(
+    $comment, $received->object_id, $received->actor_uri
+  );
+  $json = json_encode($activity, JSON_UNESCAPED_SLASHES);
+
+  // Store in outbox.
+  $activity_db_id = db_insert('backdrop_federation_outbox')
+    ->fields(array(
+      'activity_id'   => $activity['id'],
+      'activity_type' => 'Create',
+      'object_type'   => 'Note',
+      'nid'           => $comment->nid,
+      'activity_json' => $json,
+      'created'       => REQUEST_TIME,
+    ))
+    ->execute();
+
+  _backdrop_federation_queue_and_deliver_comment_activity($activity_db_id, $json, $received, $comment->cid, 'Create');
+}
+
+/**
+ * Implements hook_comment_update().
+ *
+ * When an admin edits a reply to a fediverse comment, deliver an Update{Note}.
+ */
+function backdrop_federation_comment_update($comment) {
+  if (!config_get('backdrop_federation.settings', 'enabled') || empty($comment->pid)) {
+    return;
+  }
+
+  $received = db_select('backdrop_federation_received', 'r')
+    ->fields('r', array('object_id', 'actor_uri', 'inbox_uri'))
+    ->condition('cid', $comment->pid)
+    ->execute()
+    ->fetchObject();
+
+  if (!$received) {
+    return;
+  }
+
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.activity');
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+
+  global $base_url;
+  $actor_uri   = backdrop_federation_get_actor_uri();
+  $note_id     = $base_url . '/fediverse/comment/' . $comment->cid;
+  $activity_id = $base_url . '/fediverse/activity/comment/' . $comment->cid . '/update/' . REQUEST_TIME;
+  $public      = 'https://www.w3.org/ns/activitystreams#Public';
+  $followers   = $base_url . '/fediverse/followers';
+
+  $body_item = isset($comment->comment_body[LANGUAGE_NONE][0])
+    ? $comment->comment_body[LANGUAGE_NONE][0]
+    : array('value' => '', 'format' => 'filtered_html');
+
+  $note = array(
+    'id'           => $note_id,
+    'type'         => 'Note',
+    'attributedTo' => $actor_uri,
+    'inReplyTo'    => $received->object_id,
+    'content'      => check_markup($body_item['value'], $body_item['format']),
+    'published'    => gmdate('c', $comment->created ?: REQUEST_TIME),
+    'updated'      => gmdate('c', REQUEST_TIME),
+    'to'           => array($public, $received->actor_uri),
+    'cc'           => array($followers),
+    'url'          => $note_id,
+  );
+
+  $activity = array(
+    '@context'  => 'https://www.w3.org/ns/activitystreams',
+    'id'        => $activity_id,
+    'type'      => 'Update',
+    'actor'     => $actor_uri,
+    'published' => gmdate('c', REQUEST_TIME),
+    'to'        => array($public, $received->actor_uri),
+    'cc'        => array($followers),
+    'object'    => $note,
+  );
+
+  $json = json_encode($activity, JSON_UNESCAPED_SLASHES);
+
+  $activity_db_id = db_insert('backdrop_federation_outbox')
+    ->fields(array(
+      'activity_id'   => $activity['id'],
+      'activity_type' => 'Update',
+      'object_type'   => 'Note',
+      'nid'           => $comment->nid,
+      'activity_json' => $json,
+      'created'       => REQUEST_TIME,
+    ))
+    ->execute();
+
+  _backdrop_federation_queue_and_deliver_comment_activity($activity_db_id, $json, $received, $comment->cid, 'Update');
+}
+
+/**
+ * Implements hook_comment_delete().
+ *
+ * When an admin deletes a reply to a fediverse comment, deliver a Delete with
+ * a Tombstone so the remote server removes the copy.
+ */
+function backdrop_federation_comment_delete($comment) {
+  if (!config_get('backdrop_federation.settings', 'enabled') || empty($comment->pid)) {
+    return;
+  }
+
+  $received = db_select('backdrop_federation_received', 'r')
+    ->fields('r', array('object_id', 'actor_uri', 'inbox_uri'))
+    ->condition('cid', $comment->pid)
+    ->execute()
+    ->fetchObject();
+
+  if (!$received) {
+    return;
+  }
+
+  module_load_include('inc', 'backdrop_federation', 'includes/backdrop_federation.http_signature');
+
+  global $base_url;
+  $actor_uri   = backdrop_federation_get_actor_uri();
+  $note_id     = $base_url . '/fediverse/comment/' . $comment->cid;
+  $activity_id = $base_url . '/fediverse/activity/comment/' . $comment->cid . '/delete/' . REQUEST_TIME;
+  $public      = 'https://www.w3.org/ns/activitystreams#Public';
+  $followers   = $base_url . '/fediverse/followers';
+
+  $activity = array(
+    '@context'  => 'https://www.w3.org/ns/activitystreams',
+    'id'        => $activity_id,
+    'type'      => 'Delete',
+    'actor'     => $actor_uri,
+    'published' => gmdate('c', REQUEST_TIME),
+    'to'        => array($public, $received->actor_uri),
+    'cc'        => array($followers),
+    'object'    => array(
+      'id'   => $note_id,
+      'type' => 'Tombstone',
+    ),
+  );
+
+  $json = json_encode($activity, JSON_UNESCAPED_SLASHES);
+
+  $activity_db_id = db_insert('backdrop_federation_outbox')
+    ->fields(array(
+      'activity_id'   => $activity['id'],
+      'activity_type' => 'Delete',
+      'object_type'   => 'Note',
+      'nid'           => $comment->nid,
+      'activity_json' => $json,
+      'created'       => REQUEST_TIME,
+    ))
+    ->execute();
+
+  _backdrop_federation_queue_and_deliver_comment_activity($activity_db_id, $json, $received, $comment->cid, 'Delete');
+}
+
+/**
+ * Queue a comment activity to all followers and deliver directly to the
+ * original fediverse commenter if they are not already covered by a follower
+ * inbox, then drain the queue immediately.
+ *
+ * @param int $activity_db_id
+ *   The outbox row ID returned by db_insert().
+ * @param string $json
+ *   The encoded activity JSON.
+ * @param object $received
+ *   Row from backdrop_federation_received (needs inbox_uri).
+ * @param int $cid
+ *   The local comment ID (for the watchdog message).
+ * @param string $activity_type
+ *   'Create', 'Update', or 'Delete' (for the watchdog message).
+ */
+function _backdrop_federation_queue_and_deliver_comment_activity($activity_db_id, $json, $received, $cid, $activity_type) {
+  $queue = BackdropQueue::get('backdrop_federation_activity_delivery');
+  $queued_inboxes = array();
+  $followers = db_select('backdrop_federation_followers', 'f')
+    ->fields('f', array('inbox_uri', 'shared_inbox_uri'))
+    ->execute();
+  foreach ($followers as $follower) {
+    $inbox = !empty($follower->shared_inbox_uri) ? $follower->shared_inbox_uri : $follower->inbox_uri;
+    if (!in_array($inbox, $queued_inboxes)) {
+      $queued_inboxes[] = $inbox;
+      $queue->createItem(array('activity_id' => $activity_db_id, 'inbox_uri' => $inbox));
+    }
+  }
+
+  // Deliver directly to the original commenter if not already covered above.
+  if (!empty($received->inbox_uri) && !in_array($received->inbox_uri, $queued_inboxes)) {
+    backdrop_federation_post_to_inbox($received->inbox_uri, $json);
+  }
+
+  watchdog('backdrop_federation', 'Queued comment @type (cid @cid) to @count inboxes.', array(
+    '@type'  => $activity_type,
+    '@cid'   => $cid,
+    '@count' => count($queued_inboxes),
+  ), WATCHDOG_INFO);
+
+  _backdrop_federation_deliver_queue_now();
 }
 
 /**
