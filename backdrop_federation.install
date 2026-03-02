@@ -164,6 +164,18 @@ function backdrop_federation_schema() {
         'not null' => TRUE,
         'default' => 0,
       ),
+      'actor_uri' => array(
+        'description' => 'Actor URI of the original fediverse commenter.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => FALSE,
+      ),
+      'inbox_uri' => array(
+        'description' => 'Personal inbox URI of the original fediverse commenter.',
+        'type' => 'varchar',
+        'length' => 2048,
+        'not null' => FALSE,
+      ),
       'created' => array(
         'description' => 'Timestamp when the record was created.',
         'type' => 'int',
@@ -178,6 +190,7 @@ function backdrop_federation_schema() {
     'indexes' => array(
       'cid' => array('cid'),
       'nid' => array('nid'),
+      'actor_uri' => array(array('actor_uri', 255)),
     ),
   );
 
@@ -370,6 +383,25 @@ function backdrop_federation_requirements($phase) {
   }
 
   return $requirements;
+}
+
+/**
+ * Add actor_uri and inbox_uri to backdrop_federation_received.
+ */
+function backdrop_federation_update_1000() {
+  db_add_field('backdrop_federation_received', 'actor_uri', array(
+    'description' => 'Actor URI of the original fediverse commenter.',
+    'type' => 'varchar',
+    'length' => 2048,
+    'not null' => FALSE,
+  ));
+  db_add_field('backdrop_federation_received', 'inbox_uri', array(
+    'description' => 'Personal inbox URI of the original fediverse commenter.',
+    'type' => 'varchar',
+    'length' => 2048,
+    'not null' => FALSE,
+  ));
+  db_add_index('backdrop_federation_received', 'actor_uri', array(array('actor_uri', 255)));
 }
 
 /**

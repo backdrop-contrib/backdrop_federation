@@ -241,3 +241,53 @@ function _backdrop_federation_queue_activity(Node $node, $type) {
     '@count' => count($queued_inboxes),
   ), WATCHDOG_INFO);
 }
+
+/**
+ * Build a Create{Note} activity for an admin comment reply to a fediverse post.
+ *
+ * @param object $comment
+ *   The saved Backdrop comment entity.
+ * @param string $in_reply_to_uri
+ *   The ActivityPub object URI of the fediverse post being replied to.
+ * @param string $commenter_actor_uri
+ *   The actor URI of the original fediverse commenter.
+ *
+ * @return array
+ *   The Create activity array.
+ */
+function _backdrop_federation_build_comment_reply_activity($comment, $in_reply_to_uri, $commenter_actor_uri) {
+  global $base_url;
+  $actor_uri   = backdrop_federation_get_actor_uri();
+  $note_id     = $base_url . '/fediverse/comment/' . $comment->cid;
+  $activity_id = $base_url . '/fediverse/activity/comment/' . $comment->cid . '/create/' . REQUEST_TIME;
+  $public      = 'https://www.w3.org/ns/activitystreams#Public';
+  $followers   = $base_url . '/fediverse/followers';
+
+  $body_item = isset($comment->comment_body[LANGUAGE_NONE][0])
+    ? $comment->comment_body[LANGUAGE_NONE][0]
+    : array('value' => '', 'format' => 'filtered_html');
+  $content = check_markup($body_item['value'], $body_item['format']);
+
+  $note = array(
+    'id'           => $note_id,
+    'type'         => 'Note',
+    'attributedTo' => $actor_uri,
+    'inReplyTo'    => $in_reply_to_uri,
+    'content'      => $content,
+    'published'    => gmdate('c', $comment->created ?: REQUEST_TIME),
+    'to'           => array($public, $commenter_actor_uri),
+    'cc'           => array($followers),
+    'url'          => $note_id,
+  );
+
+  return array(
+    '@context'  => 'https://www.w3.org/ns/activitystreams',
+    'id'        => $activity_id,
+    'type'      => 'Create',
+    'actor'     => $actor_uri,
+    'published' => gmdate('c', REQUEST_TIME),
+    'to'        => array($public, $commenter_actor_uri),
+    'cc'        => array($followers),
+    'object'    => $note,
+  );
+}
